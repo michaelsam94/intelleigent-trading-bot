@@ -31,6 +31,15 @@ The project includes a ready-to-use **1h config** with Telegram placeholders:
 
 In the steps below, `CONFIG` means either `configs/config-1h-telegram.jsonc` (with env vars) or `configs/my-1h.jsonc` (after you create it).
 
+### Realtime mode (Binance WebSocket)
+
+For **realtime** updates (no fixed schedule), the server can use Binance’s **WebSocket** kline stream so that each time a new candle closes it fetches that candle, runs the model, and sends Telegram.
+
+- **1 minute realtime:** Use `configs/config-1min-realtime.jsonc` with `"freq": "1min"` and `"use_websocket": true`. You get one update per minute when the 1m candle closes. You must **train on 1min data** first (download, merge, features, labels, train with that config).
+- **1 hour (WebSocket-driven):** In `configs/config-1h-telegram.jsonc` set `"use_websocket": true`. Updates then run when the 1h candle closes (same frequency as before, but driven by WebSocket instead of cron).
+
+Install the WebSocket dependency: `pip install websockets`. Then start the server with the chosen config; you’ll see “Realtime mode: Binance WebSocket kline stream” in the log.
+
 ---
 
 ## 2. Deployment steps
@@ -253,9 +262,9 @@ Then:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable itb-1h
-sudo systemctl start itb-1h
-sudo systemctl status itb-1h
+sudo systemctl enable itb-server
+sudo systemctl start itb-server
+sudo systemctl status itb-server
 ```
 
 ---

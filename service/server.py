@@ -124,6 +124,26 @@ async def main_collector_task():
     return 0
 
 
+async def process_ws_kline(dfs: dict):
+    """On WebSocket kline close: append row, analyze, run outputs (Telegram etc.)."""
+    try:
+        App.analyzer.append_data(dfs)
+    except Exception as e:
+        log.error("Error appending WebSocket kline: %s", e)
+        return
+    try:
+        await App.loop.run_in_executor(None, App.analyzer.analyze)
+    except Exception as e:
+        log.error("Error in analyze (WebSocket): %s", e)
+        return
+    output_sets = App.config.get("output_sets", [])
+    for os in output_sets:
+        try:
+            await output_feature_set(App.analyzer.df, os, App.config, App.model_store)
+        except Exception as e:
+            log.error("Error in output function (WebSocket): %s", e)
+
+
 def _send_telegram_startup_message(symbol: str, freq: str):
     """Send a one-line confirmation to Telegram on each server restart."""
     import os
@@ -262,25 +282,27 @@ def start_server(config_file):
         log.info(f"Balance: {App.config['quote_asset']} = {str(App.account_info.quote_quantity)}")
 
     #
-    # Register scheduler
+    # Realtime (WebSocket) or scheduled (cron)
     #
 
-    App.sched = AsyncIOScheduler()
-    # logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
-    logging.getLogger('apscheduler').setLevel(logging.WARNING)
+    use_websocket = venue == Venue.BINANCE and App.config.get("use_websocket", False)
 
-    trigger = freq_to_CronTrigger(freq)
-
-    App.sched.add_job(
-        main_task,
-        trigger=trigger,
-        id='main_task'
-    )
-
-    App.sched._eventloop = App.loop
-    App.sched.start()  # Start scheduler (essentially, start the thread)
-
-    log.info(f"Scheduler started.")
+    if use_websocket:
+        log.info("Realtime mode: Binance WebSocket kline stream (no fixed schedule).")
+        print("Realtime mode: Binance WebSocket kline stream.", flush=True)
+        from inputs.collector_binance_ws import run_klines_websocket
+        def _start_ws():
+            asyncio.create_task(run_klines_websocket(symbol, freq, process_ws_kline))
+        App.loop.call_soon(_start_ws)
+        App.sched = None
+    else:
+        App.sched = AsyncIOScheduler()
+        logging.getLogger('apscheduler').setLevel(logging.WARNING)
+        trigger = freq_to_CronTrigger(freq)
+        App.sched.add_job(main_task, trigger=trigger, id='main_task')
+        App.sched._eventloop = App.loop
+        App.sched.start()
+        log.info(f"Scheduler started (fixed {freq}).")
 
     # Send a one-time confirmation to Telegram on each restart
     _send_telegram_startup_message(symbol, freq)
@@ -295,7 +317,7 @@ def start_server(config_file):
     finally:
         log.info("Shutting down...")
         # Graceful shutdown
-        if App.sched and App.sched.running:
+        if App.sched is not None and App.sched.running:
              App.sched.shutdown()
              log.info(f"Scheduler shutdown.")
         # Stop the loop if it's still running (e.g., if shutdown initiated by signal other than KeyboardInterrupt)

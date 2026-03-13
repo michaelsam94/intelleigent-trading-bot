@@ -1,0 +1,71 @@
+{
+    "train": false,
+    "venue": "binance",
+    "api_key": "<your-binance-api-key>",
+    "api_secret": "<your-binance-api-secret>",
+    "telegram_bot_token": "<your-telegram-bot-token>",
+    "telegram_chat_id": "<your-telegram-chat-id>",
+    "data_folder": "./data",
+    "symbol": "BTCUSDT",
+    "description": "BTCUSDT 1min realtime, predict next 15 min",
+    "freq": "1min",
+    "use_websocket": true,
+
+    "label_horizon": 15,
+    "features_horizon": 120,
+    "train_length": 0,
+    "predict_length": 288,
+    "append_overlap_records": 5,
+
+    "data_sources": [
+        {"folder": "BTCUSDT", "file": "klines", "column_prefix": ""}
+    ],
+
+    "feature_sets": [
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["SMA"], "windows": [1, 5, 10, 15, 60]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["LINEARREG_SLOPE"], "windows": [5, 10, 15, 60]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["STDDEV"], "windows": [5, 10, 15, 60]}}
+    ],
+
+    "label_sets": [
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "high", "thresholds": [2.0], "tolerance": 0.2, "horizon": 15, "names": ["high_20"]}},
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "low", "thresholds": [2.0], "tolerance": 0.2, "horizon": 15, "names": ["low_20"]}}
+    ],
+
+    "train_feature_sets": [{"generator": "train_features", "config": {}}],
+    "train_features": [
+        "close_SMA_1", "close_SMA_5", "close_SMA_10", "close_SMA_15", "close_SMA_60",
+        "close_LINEARREG_SLOPE_5", "close_LINEARREG_SLOPE_10", "close_LINEARREG_SLOPE_15", "close_LINEARREG_SLOPE_60",
+        "close_STDDEV_5", "close_STDDEV_10", "close_STDDEV_15", "close_STDDEV_60"
+    ],
+    "labels": ["high_20", "low_20"],
+    "algorithms": [
+        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "sag", "max_iter": 100}}
+    ],
+
+    "signal_sets": [
+        {"generator": "combine", "config": {"columns": ["high_20_lc", "low_20_lc"], "names": "trade_score", "combine": "difference", "coefficient": 1.0, "constant": 0.0}},
+        {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "parameters": {"buy_signal_threshold": 0.015, "sell_signal_threshold": -0.015}}}
+    ],
+
+    "output_sets": [
+        {"generator": "score_notification_model", "config": {
+            "score_notification": true,
+            "notify_every_run": true,
+            "score_column_names": ["trade_score"],
+            "notify_band_up": true,
+            "notify_band_dn": true,
+            "positive_bands": [
+                {"edge": 0.015, "frequency": null, "sign": "〉〉〉📈", "bold": true, "text": "BUY ZONE"},
+                {"edge": 0.01, "frequency": null, "sign": "〉〉", "bold": false, "text": "strong"},
+                {"edge": 0.005, "frequency": null, "sign": "〉", "text": "weak"}
+            ],
+            "negative_bands": [
+                {"edge": -0.005, "frequency": null, "sign": "〈", "text": "weak"},
+                {"edge": -0.01, "frequency": null, "sign": "〈〈", "bold": false, "text": "strong"},
+                {"edge": -0.015, "frequency": null, "sign": "〈〈〈📉", "bold": true, "text": "SELL ZONE"}
+            ]
+        }},
+        {"generator": "trader_simulation", "config": {"buy_signal_column": "buy_signal_column", "sell_signal_column": "sell_signal_column"}}
+    ]
+}

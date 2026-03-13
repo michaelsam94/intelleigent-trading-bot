@@ -13,6 +13,7 @@
     "symbol": "BTCUSDT",
     "description": "BTCUSDT 1h – Telegram notifications",
     "freq": "1h",
+    "use_websocket": false,
 
     "label_horizon": 24,
     "features_horizon": 672,
