@@ -131,13 +131,17 @@ def start_server(config_file):
 
     App.config["train"] = False  # Server does not train - it only predicts therefore explicitly disable train mode
 
-    # Log Telegram config status so server.log shows why notifications may not send
-    t_token = App.config.get("telegram_bot_token") or ""
-    t_chat = App.config.get("telegram_chat_id") or ""
-    if t_token and "<" not in str(t_token) and "your-" not in str(t_token).lower():
-        log.info("Telegram: token set (len=%d), chat_id=%s", len(t_token), str(t_chat)[:12] + "..." if len(str(t_chat)) > 12 else str(t_chat))
+    # Log Telegram config status (to server.log and stdout so it appears in pm2 logs)
+    t_token = (App.config.get("telegram_bot_token") or "").strip()
+    t_chat = str(App.config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
+    if t_token and "<" not in t_token and "your-" not in t_token.lower():
+        msg = f"Telegram: token set (len={len(t_token)}), chat_id={t_chat[:12]}..." if len(t_chat) > 12 else f"Telegram: token set, chat_id={t_chat}"
+        log.info(msg)
+        print(msg, flush=True)
     else:
-        log.warning("Telegram: token or chat_id missing/placeholder. Notifications will not send. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (env or config).")
+        msg = "Telegram: token or chat_id missing/placeholder. Notifications will not send. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (env or config)."
+        log.warning(msg)
+        print(msg, flush=True)
 
     symbol = App.config["symbol"]
     freq = App.config["freq"]

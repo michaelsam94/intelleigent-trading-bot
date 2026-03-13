@@ -128,7 +128,7 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
     #
     bot_token = (config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "")
-    chat_id = str(chat_id).strip()
+    chat_id = str(chat_id).strip().replace("\n", "").replace("\r", "")
 
     if _is_placeholder(bot_token) or _is_placeholder(chat_id):
         log.error(
