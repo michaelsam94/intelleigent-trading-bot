@@ -174,14 +174,16 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
     # Process configuration parameters and prepare all needed for feature generation
     #
 
-    # Transform str/list and list to dict with argument names as keys and column names as values
+    # Transform str/list and list to dict with argument names as keys and column names as values.
+    # Talib expects standard names (high, low, close, volume, etc.); use config column names as arg names.
     column_names = config.get('columns')
     if isinstance(column_names, str):
         column_names = {'real': column_names}  # Single default input series
     elif isinstance(column_names, list) and len(column_names) == 1:
         column_names = {'real': column_names[0]}  # Single default input series
     elif isinstance(column_names, list):
-        column_names = {f'real{i}': col for i, col in enumerate(column_names)}  # Multiple default input series
+        # Use column names as Talib arg names (e.g. high, low, close for ATR; close, volume for OBV)
+        column_names = {col: col for col in column_names}
     elif isinstance(column_names, dict):
         pass  # Do nothing
     else:
