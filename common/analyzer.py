@@ -261,7 +261,8 @@ class Analyzer:
             # Compare all numeric values of the previously retrieved and newly retrieved rows for the same time
             old_row = self.previous_df[num_cols].loc[idx]
             new_row = self.df[num_cols].loc[idx]
-            comp_idx = np.isclose(old_row, new_row)
+            both_nan = np.isnan(old_row.values) & np.isnan(new_row.values)
+            comp_idx = np.isclose(old_row, new_row, equal_nan=True) | both_nan
             if not np.all(comp_idx):
                 log.warning(f"Newly computed row is not equal to the previously computed row for '{idx}'. NEW: {new_row[~comp_idx].to_dict()}. OLD: {old_row[~comp_idx].to_dict()}")
 

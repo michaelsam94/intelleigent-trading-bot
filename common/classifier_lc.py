@@ -87,8 +87,14 @@ def predict_lc(models: tuple, df_X_test, model_config: dict):
     is_scale = scaler is not None
 
     input_index = df_X_test.index
+    X_orig = df_X_test.copy()
     if is_scale:
-        df_X_test = scaler.transform(df_X_test)
+        # Avoid all-NaN from scaler (e.g. scale_ was 0 when fitted on 1 row)
+        if hasattr(scaler, "scale_") and scaler.scale_ is not None:
+            scale_safe = np.where(scaler.scale_ == 0, 1.0, scaler.scale_)
+            df_X_test = (df_X_test.values - scaler.mean_) / scale_safe
+        else:
+            df_X_test = scaler.transform(df_X_test)
         df_X_test = pd.DataFrame(data=df_X_test, index=input_index)
     else:
         df_X_test = df_X_test
@@ -96,10 +102,27 @@ def predict_lc(models: tuple, df_X_test, model_config: dict):
     df_X_test_nonans = df_X_test.dropna()  # Drop nans, possibly create gaps in index
     nonans_index = df_X_test_nonans.index
 
-    proba = models[0].predict_proba(df_X_test_nonans.values)  # (n, 2) or sometimes (1, 2) for small n
-    y_vals = np.atleast_1d(proba[:, 1].squeeze())
-    n_vals = len(y_vals)
-    # Index must match data length (model may return fewer values than rows, e.g. 1 when given 357)
-    pred_index = nonans_index[-n_vals:] if n_vals < len(nonans_index) else nonans_index
+    if len(nonans_index) == 0:
+        # Scaler produced all NaN; predict on last row with safe scaling so we get at least one value
+        last_row = np.asarray(X_orig.iloc[-1:].values, dtype=np.float64)
+        if np.any(np.isnan(last_row)):
+            if is_scale and hasattr(scaler, "mean_"):
+                last_row = np.where(np.isnan(last_row), scaler.mean_, last_row)
+            else:
+                last_row = np.nan_to_num(last_row, nan=0.0)
+        if is_scale and hasattr(scaler, "scale_") and scaler.scale_ is not None:
+            scale_safe = np.where(scaler.scale_ == 0, 1.0, scaler.scale_)
+            last_row = (last_row - scaler.mean_) / scale_safe
+        elif is_scale:
+            last_row = scaler.transform(X_orig.iloc[-1:])
+        proba = models[0].predict_proba(last_row)
+        y_vals = np.atleast_1d(proba[:, 1].squeeze())
+        pred_index = input_index[-1:]
+    else:
+        proba = models[0].predict_proba(df_X_test_nonans.values)
+        y_vals = np.atleast_1d(proba[:, 1].squeeze())
+        n_vals = len(y_vals)
+        pred_index = nonans_index[-n_vals:] if n_vals < len(nonans_index) else nonans_index
+
     sr_ret = pd.Series(data=y_vals, index=pred_index).reindex(input_index)
     return sr_ret
