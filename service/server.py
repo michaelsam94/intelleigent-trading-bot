@@ -1,4 +1,5 @@
 import click
+import requests
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -121,6 +122,27 @@ async def main_collector_task():
 
     log.info(f"<=== End collector task.")
     return 0
+
+
+def _send_telegram_startup_message(symbol: str, freq: str):
+    """Send a one-line confirmation to Telegram on each server restart."""
+    import os
+    token = (App.config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = str(App.config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip().replace("\n", "").replace("\r", "")
+    if not token or not chat_id or "<" in token or "your-" in token.lower():
+        return
+    text = f"✅ ITB server started. {symbol} @ {freq} — Telegram connected."
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&parse_mode=markdown&text={requests.utils.quote(text)}"
+        r = requests.get(url)
+        data = r.json()
+        if data.get("ok"):
+            log.info("Telegram startup message sent.")
+            print("Telegram startup message sent.", flush=True)
+        else:
+            log.warning("Telegram startup message failed: %s", data.get("description", data))
+    except Exception as e:
+        log.warning("Telegram startup message error: %s", e)
 
 
 @click.command()
@@ -259,7 +281,10 @@ def start_server(config_file):
     App.sched.start()  # Start scheduler (essentially, start the thread)
 
     log.info(f"Scheduler started.")
-    
+
+    # Send a one-time confirmation to Telegram on each restart
+    _send_telegram_startup_message(symbol, freq)
+
     #
     # Start event loop and scheduler
     #
