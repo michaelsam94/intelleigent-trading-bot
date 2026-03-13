@@ -69,12 +69,13 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
         new_to_time_interval = False
 
     # Send only if one of these conditions is true or entered new time interval (current time)
+    notify_every_run = model.get("notify_every_run", False)
     notification_is_needed = (
-        (model.get("notify_band_up") and band_up) or  # entered a higher band (absolute score increased). always notify when band changed
-        (model.get("notify_band_dn") and band_dn) or  # returned to a lower band (absolute score decreased). always notify when band changed
-        new_to_time_interval  # new time interval is started like 10 minutes (minimum frequency independent of the band changes)
+        notify_every_run
+        or (model.get("notify_band_up") and band_up)
+        or (model.get("notify_band_dn") and band_dn)
+        or new_to_time_interval
     )
-    # We might also exclude any notifications in case of no band (neutral zone)
 
     if not notification_is_needed:
         return  # Nothing important happened: within the same band and same time interval
@@ -114,17 +115,31 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
     #
     # Send notification
     #
-    bot_token = config["telegram_bot_token"]
-    chat_id = config["telegram_chat_id"]
+    bot_token = config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not bot_token or not chat_id:
+        log.error(
+            "Telegram not sent: missing telegram_bot_token or telegram_chat_id. "
+            "Set in config or env TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."
+        )
+        return
+
+    chat_id = str(chat_id).strip()
 
     try:
         url = 'https://api.telegram.org/bot' + bot_token + '/sendMessage?chat_id=' + chat_id + '&parse_mode=markdown&text=' + message
         response = requests.get(url)
         response_json = response.json()
         if not response_json.get('ok'):
-            log.error(f"Error sending notification.")
+            log.error(
+                "Telegram API error: %s",
+                response_json.get("description", response_json),
+            )
+        else:
+            log.info("Telegram notification sent to chat_id=%s", chat_id[:8] + "..." if len(chat_id) > 8 else chat_id)
     except Exception as e:
-        log.error(f"Error sending notification: {e}")
+        log.error("Error sending Telegram notification: %s", e)
 
 
 def _find_score_band(score_value, model):

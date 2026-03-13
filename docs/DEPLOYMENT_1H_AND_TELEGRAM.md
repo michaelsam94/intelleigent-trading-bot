@@ -16,14 +16,20 @@ The project includes a ready-to-use **1h config** with Telegram placeholders:
 - **Labels:** 24-bar horizon (≈ 1 day ahead)
 - **Outputs:** Score notifications and diagram notifications sent to Telegram
 
-Copy and customize it (see below for Telegram and Binance keys):
+**On a server (fresh clone):** `configs/my-1h.jsonc` is in `.gitignore` and is **not** in the repo. Use either:
 
-```bash
-cp configs/config-1h-telegram.jsonc configs/my-1h.jsonc
-# Edit configs/my-1h.jsonc: api_key, api_secret, telegram_bot_token, telegram_chat_id, data_folder
-```
+- **Option 1 (recommended):** Use the template that is in the repo and set credentials via **environment variables** (see §2.5). In all commands use:
+  ```bash
+  -c configs/config-1h-telegram.jsonc
+  ```
+- **Option 2:** Create your local config on the server, then use it:
+  ```bash
+  cp configs/config-1h-telegram.jsonc configs/my-1h.jsonc
+  # Edit configs/my-1h.jsonc: api_key, api_secret, telegram_bot_token, telegram_chat_id, data_folder
+  ```
+  Then use `-c configs/my-1h.jsonc` in all commands.
 
-Use `my-1h.jsonc` in all commands below where `-c config.json` is shown.
+In the steps below, `CONFIG` means either `configs/config-1h-telegram.jsonc` (with env vars) or `configs/my-1h.jsonc` (after you create it).
 
 ---
 
@@ -73,7 +79,7 @@ If TA-Lib fails to install via pip, install the C library first (e.g. `brew inst
    "telegram_chat_id": "-1001234567890"
    ```
 
-Use your actual config file name in the next steps (e.g. `-c configs/my-1h.jsonc`).
+Use `CONFIG` (see §1) in the next steps.
 
 ### 2.5 Where to add credentials on the server
 
@@ -83,7 +89,7 @@ You should **never** put real API keys or tokens in a file that is committed to 
 
 1. On the server, create a config that is **not** in the repo, e.g. `configs/my-1h.jsonc`.
 2. Put your real values there:
-   - `api_key`, `api_secret` (Binance)
+   - `api_key`, `api_secret` (Binance)ç
    - `telegram_bot_token`, `telegram_chat_id`
    - `data_folder` (e.g. `/var/lib/itb/data`)
 3. Run the server with that file:
@@ -150,12 +156,14 @@ Run from the project root. These steps build the matrix, train models, and produ
 
 | Step | Command | Purpose |
 |------|---------|---------|
-| 1 | `python -m scripts.download -c configs/my-1h.jsonc` | Download 1h klines from Binance |
-| 2 | `python -m scripts.merge -c configs/my-1h.jsonc` | Merge into one time series |
-| 3 | `python -m scripts.features -c configs/my-1h.jsonc` | Generate features |
-| 4 | `python -m scripts.labels -c configs/my-1h.jsonc` | Generate labels |
-| 5 | `python -m scripts.train -c configs/my-1h.jsonc` | Train models (SVC etc.) |
-| 6 | `python -m scripts.predict -c configs/my-1h.jsonc` | Optional: run prediction and see scores |
+| 1 | `python -m scripts.download -c CONFIG` | Download 1h klines from Binance |
+| 2 | `python -m scripts.merge -c CONFIG` | Merge into one time series |
+| 3 | `python -m scripts.features -c CONFIG` | Generate features |
+| 4 | `python -m scripts.labels -c CONFIG` | Generate labels |
+| 5 | `python -m scripts.train -c CONFIG` | Train models (SVC etc.) |
+| 6 | `python -m scripts.predict -c CONFIG` | Optional: run prediction and see scores |
+
+Use `configs/config-1h-telegram.jsonc` for CONFIG if you rely on env vars; use `configs/my-1h.jsonc` only after creating it with `cp configs/config-1h-telegram.jsonc configs/my-1h.jsonc`.
 
 After step 5, the **MODELS** directory under your `data_folder`/symbol will contain the trained models. The server loads these on startup.
 
@@ -164,14 +172,62 @@ After step 5, the **MODELS** directory under your `data_folder`/symbol will cont
 The server fetches new 1h klines, runs the analyzer, and sends notifications (e.g. to Telegram) every **1 hour**:
 
 ```bash
-python -m service.server -c configs/my-1h.jsonc
+python -m service.server -c configs/config-1h-telegram.jsonc
 ```
+
+(Or `-c configs/my-1h.jsonc` if you created that file.)
 
 - Runs until you stop it (Ctrl+C).
 - Logs to `server.log` in the current directory.
 - For production: use a process manager (systemd, supervisor, or Docker) and run the same command; see Section 2.7.
 
 ### 2.8 Production run (optional)
+
+**PM2 (recommended for keeping the server running):**
+
+Run the **server** (not the train script) so it stays up and fetches Binance data every 1 hour.
+
+**Important:** If you use environment variables for credentials, export them **in the same shell** before starting PM2, or use an ecosystem file (see below). Otherwise the process won’t see them.
+
+```bash
+cd /path/to/intelleigent-trading-bot
+source venv/bin/activate
+
+# Export credentials so the server (and PM2) can see them
+export BINANCE_API_KEY="your-key"
+export BINANCE_API_SECRET="your-secret"
+export TELEGRAM_BOT_TOKEN="your-bot-token"
+export TELEGRAM_CHAT_ID="your-chat-id"
+
+pm2 start python3 --name "itb-server" -- -m service.server -c configs/config-1h-telegram.jsonc
+pm2 save
+pm2 startup
+```
+
+**Alternative – PM2 ecosystem file (env in file):** create `ecosystem.config.cjs` in the project root:
+
+```javascript
+module.exports = {
+  apps: [{
+    name: "itb-server",
+    script: "python3",
+    args: "-m service.server -c configs/config-1h-telegram.jsonc",
+    cwd: "/home/michaelsamuelmichael/intelleigent-trading-bot",
+    interpreter: "none",
+    env: {
+      BINANCE_API_KEY: "your-key",
+      BINANCE_API_SECRET: "your-secret",
+      TELEGRAM_BOT_TOKEN: "your-bot-token",
+      TELEGRAM_CHAT_ID: "your-chat-id"
+    }
+  }]
+};
+```
+
+Then run: `pm2 start ecosystem.config.cjs` (and add `ecosystem.config.cjs` to `.gitignore` if it contains secrets).
+
+- **Do not** run `scripts.train` under PM2 as a long-running process. Train is a one-off batch job: it runs once, writes models, then exits. Use it once (or on a schedule, e.g. cron weekly) to create/refresh models.
+- The **server** is what runs continuously, pulls new 1h data from Binance each hour, and sends Telegram alerts using the models that train already produced.
 
 **systemd (Linux)** — create `/etc/systemd/system/itb-1h.service`:
 

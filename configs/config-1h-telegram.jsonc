@@ -81,6 +81,7 @@
         {
             "generator": "score_notification_model", "config": {
                 "score_notification": true,
+                "notify_every_run": true,
                 "score_column_names": ["trade_score"],
                 "notify_band_up": true,
                 "notify_band_dn": true,
