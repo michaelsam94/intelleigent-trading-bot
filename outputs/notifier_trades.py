@@ -69,6 +69,7 @@ async def generate_trader_transaction(df, model: dict, config: dict):
 
     # Save this transaction
     App.transaction = t_dict
+    transaction_path.parent.mkdir(parents=True, exist_ok=True)
     with open(transaction_path, 'a+') as f:
         f.write(",".join([f"{v:.2f}" if isinstance(v, float) else str(v) for v in t_dict.values()]) + "\n")
 
@@ -226,6 +227,7 @@ def load_last_transaction():
             t_dict["profit"] = float(t_dict["profit"])
             #t_dict = json.loads(line)
     else:  # Create file with header
+        transaction_path.parent.mkdir(parents=True, exist_ok=True)
         with open(transaction_path, 'a+') as f:
             #f.write("timestamp,price,profit,status\n")
             f.write("2020-01-01 00:00:00,0.0,0.0,SELL\n")
