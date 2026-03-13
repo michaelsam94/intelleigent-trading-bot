@@ -1,6 +1,7 @@
 import os
 import sys
 import importlib
+import inspect
 from datetime import datetime, timezone, timedelta
 from typing import Union
 import json
@@ -162,6 +163,12 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
         except Exception as e:
             raise ValueError(f"Cannot import module {mod_name}. Check if talib is installed correctly")
 
+    def _talib_input_param_names(talib_fn):
+        """Return ordered list of input parameter names for the talib function (excludes timeperiod, out)."""
+        sig = inspect.signature(talib_fn)
+        skip = {'timeperiod', 'out'}
+        return [p for p in sig.parameters.keys() if p not in skip]
+
     mod_name = "talib.abstract"  # We need this to get function annotations, particularly, if they are unstable (support stream mode)
     talib_mod_abstract = sys.modules.get(mod_name)  # Try to load
     if talib_mod_abstract is None:  # If not yet imported
@@ -175,15 +182,14 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
     #
 
     # Transform str/list and list to dict with argument names as keys and column names as values.
-    # Talib expects standard names (high, low, close, volume, etc.); use config column names as arg names.
+    # For multi-column, dict order preserves config order; talib arg names resolved per function via inspect.signature.
     column_names = config.get('columns')
     if isinstance(column_names, str):
         column_names = {'real': column_names}  # Single default input series
     elif isinstance(column_names, list) and len(column_names) == 1:
         column_names = {'real': column_names[0]}  # Single default input series
     elif isinstance(column_names, list):
-        # Use column names as Talib arg names (e.g. high, low, close for ATR; close, volume for OBV)
-        column_names = {col: col for col in column_names}
+        column_names = {col: col for col in column_names}  # order preserved in dict
     elif isinstance(column_names, dict):
         pass  # Do nothing
     else:
@@ -237,7 +243,13 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
                 except AttributeError as e:
                     raise ValueError(f"Cannot resolve talib function name '{func_name}'. Check the (existence of) name of the function")
 
-                args = columns.copy()
+                # Map our columns to this function's actual parameter names (talib uses real0/real1 for some, high/low/close for others)
+                talib_params = _talib_input_param_names(fn)
+                col_series_ordered = list(columns.values())
+                if len(talib_params) == len(col_series_ordered):
+                    args = dict(zip(talib_params, col_series_ordered))
+                else:
+                    args = columns.copy()
                 if w:
                     args['timeperiod'] = w
                 if w == 1 and len(columns) == 1:  # For window 1 use the original values (because talib fails to do this)
@@ -255,11 +267,16 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
                     raise ValueError(f"Cannot resolve talib.stream function name '{func_name}'. Check the (existence of) name of the function")
 
                 # Here fn (function) is a different function from a different module (this function is applied to a single window rather than to rolling windows)
+                talib_params = _talib_input_param_names(fn)
+                col_series_ordered = list(columns.values())
                 out_values = []
                 for r in range(last_rows):
                     # Remove r elements from the end
                     # Note that we do not remove elements from the start so the length is limited from one side only
-                    args = {k: v.iloc[:len(v)-r] for k, v in columns.items()}
+                    if len(talib_params) == len(col_series_ordered):
+                        args = dict(zip(talib_params, [v.iloc[:len(v)-r] for v in col_series_ordered]))
+                    else:
+                        args = {k: v.iloc[:len(v)-r] for k, v in columns.items()}
                     if w:
                         args['timeperiod'] = w
 
