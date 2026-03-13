@@ -33,15 +33,19 @@ def train_lc(df_X, df_y, model_config: dict):
         scaler = None
         X_train = df_X.values
 
-    y_train = df_y.values
+    y_train = np.ravel(df_y.values)
+    n_classes = len(np.unique(y_train))
+    if n_classes < 2:
+        raise ValueError(
+            "Training data has only one class (all same label). "
+            "LogisticRegression needs both 0 and 1. Use more training data (e.g. train_length) or a longer history so the label (e.g. high_20) is True sometimes."
+        )
 
     #
     # Create model
     #
     train_conf = model_config.get("train", {})
-
-    args = train_conf.copy()
-    args["n_jobs"] = -1
+    args = {k: v for k, v in train_conf.items() if k not in ("n_jobs", "penalty")}
     args["verbose"] = 0
     model = LogisticRegression(**args)
 

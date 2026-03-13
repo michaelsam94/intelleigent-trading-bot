@@ -13,7 +13,7 @@
 
     "label_horizon": 15,
     "features_horizon": 120,
-    "train_length": 0,
+    "train_length": 40320,
     "predict_length": 288,
     "append_overlap_records": 5,
 
