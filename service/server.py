@@ -140,7 +140,9 @@ async def process_ws_kline(dfs: dict):
     try:
         await App.loop.run_in_executor(None, App.analyzer.analyze)
     except Exception as e:
+        import traceback
         log.error("Error in analyze (WebSocket): %s", e)
+        log.error(traceback.format_exc())
         return
     output_sets = App.config.get("output_sets", [])
     for os in output_sets:

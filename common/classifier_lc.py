@@ -93,8 +93,6 @@ def predict_lc(models: tuple, df_X_test, model_config: dict):
     y_test_hat_nonans = y_test_hat_nonans[:, 1]  # Or y_test_hat.flatten()
     y_test_hat_nonans = pd.Series(data=y_test_hat_nonans, index=nonans_index)  # Attach indexes with gaps
 
-    df_ret = pd.DataFrame(index=input_index)  # Create empty dataframe with original index
-    df_ret["y_hat"] = y_test_hat_nonans  # Join using indexes
-    sr_ret = df_ret["y_hat"]  # This series has all original input indexes but NaNs where input is NaN
-
+    # Reindex so returned Series always has len(input_index); avoids length mismatch downstream
+    sr_ret = y_test_hat_nonans.reindex(input_index)
     return sr_ret

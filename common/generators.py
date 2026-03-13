@@ -145,6 +145,8 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
             else:
                 raise ValueError(f"Unknown algorithm type {algo_type}. Check algorithm list.")
 
+            # Ensure length matches (avoids "Length of values (1) does not match length of index (357)")
+            df_y_hat = df_y_hat.reindex(train_df.index).values
             out_df[score_column_name] = df_y_hat
             features.append(score_column_name)
 
