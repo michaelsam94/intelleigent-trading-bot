@@ -5,6 +5,18 @@ from sklearn.preprocessing import StandardScaler
 
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 
+
+class _ConstantBinaryClassifier:
+    """Predicts a constant 0 or 1 with predict_proba shape (n, 2) for pipeline compatibility."""
+
+    def __init__(self, constant: int):
+        self.constant = constant
+
+    def predict_proba(self, X):
+        n = X.shape[0]
+        c = self.constant
+        return np.column_stack([1 - c, c]).astype(np.float64)
+
 def train_predict_lc(df_X, df_y, df_X_test, model_config: dict):
     """
     Train model with the specified hyper-parameters and return its predictions for the test data.
@@ -36,10 +48,10 @@ def train_lc(df_X, df_y, model_config: dict):
     y_train = np.ravel(df_y.values)
     n_classes = len(np.unique(y_train))
     if n_classes < 2:
-        raise ValueError(
-            "Training data has only one class (all same label). "
-            "LogisticRegression needs both 0 and 1. Use more training data (e.g. train_length) or a longer history so the label (e.g. high_20) is True sometimes."
-        )
+        constant = int(y_train[0])
+        print(f"WARNING: Only one class in training data (all {constant}). Using constant predictor until more data is available.")
+        model = _ConstantBinaryClassifier(constant)
+        return (model, scaler)
 
     #
     # Create model
