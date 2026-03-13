@@ -17,16 +17,21 @@ from outputs.notifier_diagram import *
 from outputs import get_trader_functions
 
 import logging
+import sys
 
 log = logging.getLogger('server')
 
+_fmt = "%(asctime)s %(levelname)s %(message)s"
 logging.basicConfig(
     filename="server.log",
     level=logging.DEBUG,
-    #format = "%(asctime)s.%(msecs)03d %(levelname)s %(module)s - %(funcName)s: %(message)s",
-    format = "%(asctime)s %(levelname)s %(message)s",
-    #datefmt = '%Y-%m-%d %H:%M:%S',
+    format=_fmt,
 )
+# Also log to stdout so PM2 logs and terminals show output
+_root = logging.getLogger()
+_h = logging.StreamHandler(sys.stdout)
+_h.setFormatter(logging.Formatter(_fmt))
+_root.addHandler(_h)
 
 # Get the collector functions based on the collector type
 
@@ -126,6 +131,7 @@ async def main_collector_task():
 
 async def process_ws_kline(dfs: dict):
     """On WebSocket kline close: append row, analyze, run outputs (Telegram etc.)."""
+    symbol = App.config.get("symbol", "")
     try:
         App.analyzer.append_data(dfs)
     except Exception as e:
@@ -142,6 +148,9 @@ async def process_ws_kline(dfs: dict):
             await output_feature_set(App.analyzer.df, os, App.config, App.model_store)
         except Exception as e:
             log.error("Error in output function (WebSocket): %s", e)
+    # So PM2 logs show each realtime tick
+    last_ts = App.analyzer.df.index[-1] if len(App.analyzer.df) else None
+    log.info("Realtime %s kline processed → analyze + outputs done. Last row: %s", symbol, last_ts)
 
 
 def _send_telegram_startup_message(symbol: str, freq: str):
