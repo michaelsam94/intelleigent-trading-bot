@@ -40,7 +40,7 @@
     ],
     "labels": ["high_20", "low_20"],
     "algorithms": [
-        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "sag", "max_iter": 100}}
+        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": false}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "sag", "max_iter": 100}}
     ],
 
     "signal_sets": [

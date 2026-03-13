@@ -49,6 +49,13 @@ def train_lc(df_X, df_y, model_config: dict):
     n_classes = len(np.unique(y_train))
     if n_classes < 2:
         constant = int(y_train[0])
+        # Set "allow_constant_fallback": false in algorithm params to require real LC and fail instead
+        if not params.get("allow_constant_fallback", True):
+            raise ValueError(
+                "Training data has only one class (all same label). "
+                "Need both 0 and 1 for LogisticRegression. Use more data (train_length, download more 1m history), "
+                "or lower label threshold (e.g. 1.0 for 1% move in 15 min), then re-run download → merge → features → labels → train."
+            )
         print(f"WARNING: Only one class in training data (all {constant}). Using constant predictor until more data is available.")
         model = _ConstantBinaryClassifier(constant)
         return (model, scaler)
@@ -89,10 +96,10 @@ def predict_lc(models: tuple, df_X_test, model_config: dict):
     df_X_test_nonans = df_X_test.dropna()  # Drop nans, possibly create gaps in index
     nonans_index = df_X_test_nonans.index
 
-    y_test_hat_nonans = models[0].predict_proba(df_X_test_nonans.values)  # It returns pairs or probas for 0 and 1
-    y_test_hat_nonans = y_test_hat_nonans[:, 1]  # Or y_test_hat.flatten()
-    y_test_hat_nonans = pd.Series(data=y_test_hat_nonans, index=nonans_index)  # Attach indexes with gaps
-
-    # Reindex so returned Series always has len(input_index); avoids length mismatch downstream
-    sr_ret = y_test_hat_nonans.reindex(input_index)
+    proba = models[0].predict_proba(df_X_test_nonans.values)  # (n, 2) or sometimes (1, 2) for small n
+    y_vals = np.atleast_1d(proba[:, 1].squeeze())
+    n_vals = len(y_vals)
+    # Index must match data length (model may return fewer values than rows, e.g. 1 when given 357)
+    pred_index = nonans_index[-n_vals:] if n_vals < len(nonans_index) else nonans_index
+    sr_ret = pd.Series(data=y_vals, index=pred_index).reindex(input_index)
     return sr_ret
