@@ -136,3 +136,5 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Buy/sell thresholds | `signal_sets` → `buy_signal_threshold`: 0.015, `sell_signal_threshold`: -0.015 |
 | Telegram frequency | `notify_every_run`: false → only on band change |
 | Realtime mode | `use_websocket`: true, `freq`: 1min |
+| Feature families | Trend (SMA, EMA, LINEARREG_SLOPE), Momentum (RSI, ROC, MOM), Volatility (STDDEV, ATR), Volume (OBV, MFI) |
+| Algorithms | `lc` (LogisticRegression) + `gb` (LightGBM). Combine uses `lc` by default; switch to `gb` when both label classes exist. |
