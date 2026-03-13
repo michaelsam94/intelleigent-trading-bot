@@ -28,8 +28,8 @@
     ],
 
     "label_sets": [
-        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "high", "thresholds": [1.0], "tolerance": 0.2, "horizon": 15, "names": ["high_20"]}},
-        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "low", "thresholds": [1.0], "tolerance": 0.2, "horizon": 15, "names": ["low_20"]}}
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "high", "thresholds": [0.5], "tolerance": 0.2, "horizon": 15, "names": ["high_20"]}},
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "low", "thresholds": [0.5], "tolerance": 0.2, "horizon": 15, "names": ["low_20"]}}
     ],
 
     "train_feature_sets": [{"generator": "train_features", "config": {}}],
@@ -40,7 +40,7 @@
     ],
     "labels": ["high_20", "low_20"],
     "algorithms": [
-        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": false}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "sag", "max_iter": 100}}
+        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": true}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "sag", "max_iter": 100}}
     ],
 
     "signal_sets": [
