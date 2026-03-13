@@ -75,7 +75,76 @@ If TA-Lib fails to install via pip, install the C library first (e.g. `brew inst
 
 Use your actual config file name in the next steps (e.g. `-c configs/my-1h.jsonc`).
 
-### 2.5 One-time batch pipeline (download → train → models)
+### 2.5 Where to add credentials on the server
+
+You should **never** put real API keys or tokens in a file that is committed to Git. On the server you have two options:
+
+#### Option A: Config file on the server (not in Git)
+
+1. On the server, create a config that is **not** in the repo, e.g. `configs/my-1h.jsonc`.
+2. Put your real values there:
+   - `api_key`, `api_secret` (Binance)
+   - `telegram_bot_token`, `telegram_chat_id`
+   - `data_folder` (e.g. `/var/lib/itb/data`)
+3. Run the server with that file:
+   ```bash
+   python -m service.server -c configs/my-1h.jsonc
+   ```
+4. Ensure `configs/my-1h.jsonc` is in `.gitignore` (it is), so it is never committed.
+
+You can copy the template from the repo and edit it on the server:
+```bash
+cp configs/config-1h-telegram.jsonc configs/my-1h.jsonc
+# edit configs/my-1h.jsonc with your credentials
+```
+
+#### Option B: Environment variables (recommended on server)
+
+The app reads these **environment variables** and overrides the config when they are set:
+
+| Env var | Config key |
+|--------|------------|
+| `BINANCE_API_KEY` | `api_key` |
+| `BINANCE_API_SECRET` | `api_secret` |
+| `TELEGRAM_BOT_TOKEN` | `telegram_bot_token` |
+| `TELEGRAM_CHAT_ID` | `telegram_chat_id` |
+
+On the server you can:
+
+1. Use the **template** config from the repo (with placeholders); do not put secrets in it.
+2. Set the env vars before starting the server.
+
+**Example (systemd):** in your service file:
+
+```ini
+[Service]
+Environment="BINANCE_API_KEY=your-key"
+Environment="BINANCE_API_SECRET=your-secret"
+Environment="TELEGRAM_BOT_TOKEN=your-token"
+Environment="TELEGRAM_CHAT_ID=your-chat-id"
+ExecStart=.../python -m service.server -c configs/config-1h-telegram.jsonc
+```
+
+**Example (shell):**
+
+```bash
+export BINANCE_API_KEY="your-key"
+export BINANCE_API_SECRET="your-secret"
+export TELEGRAM_BOT_TOKEN="your-token"
+export TELEGRAM_CHAT_ID="your-chat-id"
+python -m service.server -c configs/config-1h-telegram.jsonc
+```
+
+**Example (file not in Git):** create `/etc/itb/env` (or `~/.itb-env`) with the exports, `chmod 600`, then:
+
+```bash
+source /etc/itb/env
+python -m service.server -c configs/config-1h-telegram.jsonc
+```
+
+With Option B, the config in the repo stays safe to commit and credentials live only in the environment.
+
+### 2.6 One-time batch pipeline (download → train → models)
 
 Run from the project root. These steps build the matrix, train models, and produce the files the server needs.
 
@@ -90,7 +159,7 @@ Run from the project root. These steps build the matrix, train models, and produ
 
 After step 5, the **MODELS** directory under your `data_folder`/symbol will contain the trained models. The server loads these on startup.
 
-### 2.6 Run the server (online / 1h schedule)
+### 2.7 Run the server (online / 1h schedule)
 
 The server fetches new 1h klines, runs the analyzer, and sends notifications (e.g. to Telegram) every **1 hour**:
 
@@ -102,7 +171,7 @@ python -m service.server -c configs/my-1h.jsonc
 - Logs to `server.log` in the current directory.
 - For production: use a process manager (systemd, supervisor, or Docker) and run the same command; see Section 2.7.
 
-### 2.7 Production run (optional)
+### 2.8 Production run (optional)
 
 **systemd (Linux)** — create `/etc/systemd/system/itb-1h.service`:
 

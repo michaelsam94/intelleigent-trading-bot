@@ -249,7 +249,15 @@ dmypy.json
 cython_debug/
 
 # End of https://www.toptal.com/developers/gitignore/api/python,pycharm
+# Configs with real credentials - never commit these
 config.json
-/config*.json  # Configs may have credentials
+/config*.json
+configs/my-*.jsonc
+configs/*-local.jsonc
+configs/config.json
+
+# Optional: ignore entire configs/ if you keep all real configs there
+# configs/
+
 /MODELS/
 /DATA/

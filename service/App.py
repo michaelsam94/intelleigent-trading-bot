@@ -1,8 +1,9 @@
 from pathlib import Path
 from typing import Union
 import json
-from datetime import datetime, date, timedelta
+import os
 import re
+from datetime import datetime, date, timedelta
 
 import pandas as pd
 
@@ -232,6 +233,23 @@ def load_config(config_file):
 
             conf_json = json.loads(conf_str)
             App.config.update(conf_json)
+
+    # Override with environment variables (for server: no credentials in config file)
+    _apply_config_env(App.config)
+
+
+def _apply_config_env(config: dict):
+    """Override config with env vars when set. Use on server to avoid storing secrets in files."""
+    env_map = (
+        ("BINANCE_API_KEY", "api_key"),
+        ("BINANCE_API_SECRET", "api_secret"),
+        ("TELEGRAM_BOT_TOKEN", "telegram_bot_token"),
+        ("TELEGRAM_CHAT_ID", "telegram_chat_id"),
+    )
+    for env_key, config_key in env_map:
+        val = os.environ.get(env_key)
+        if val:
+            config[config_key] = val
 
 
 if __name__ == "__main__":
