@@ -303,7 +303,7 @@ def start_server(config_file):
         print("Realtime mode: Binance WebSocket kline stream.", flush=True)
         from inputs.collector_binance_ws import run_klines_websocket
         def _start_ws():
-            asyncio.create_task(run_klines_websocket(symbol, freq, process_ws_kline))
+            App.ws_task = App.loop.create_task(run_klines_websocket(symbol, freq, process_ws_kline))
         App.loop.call_soon(_start_ws)
         App.sched = None
     else:
@@ -335,10 +335,15 @@ def start_server(config_file):
         if App.loop.is_running():
              App.loop.stop()
              log.info("Event loop stop requested.")
-        # Close the loop
-        # Allow pending tasks to complete before closing (optional but good practice)
-        # You might need to run loop.run_until_complete(asyncio.sleep(0.1)) or similar
-        # if loop.stop() doesn't immediately halt everything.
+        # Cancel WebSocket and other pending tasks so "Event loop is closed" is not raised
+        pending = asyncio.all_tasks(App.loop)
+        for t in pending:
+            t.cancel()
+        if pending:
+            try:
+                App.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
         App.loop.close()
         log.info(f"Event loop closed.")
         if venue == venue.BINANCE:

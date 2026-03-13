@@ -23,6 +23,7 @@ class App:
     # System
     loop = None  # asyncio main loop
     sched = None  # Scheduler
+    ws_task = None  # WebSocket kline task (realtime mode), for graceful shutdown
 
     analyzer = None  # Store and analyze data
 
