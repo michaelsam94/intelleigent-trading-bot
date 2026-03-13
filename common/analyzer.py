@@ -218,9 +218,11 @@ class Analyzer:
             predict_labels_df = pd.concat([predict_labels_df, fs_df], axis=1)
             predict_label_columns.extend(feats)
 
-        # Attach all predicted label columns (only for last rows) to the main data frame
-        self.df = self.df.combine_first(predict_labels_df)  # Attach new columns
-        self.df.update(predict_labels_df)  # Overwrite older values with newly computed values
+        # Attach predicted label columns by index so 1-row (realtime) and N-row (batch) both work
+        for col in predict_labels_df.columns:
+            if col not in self.df.columns:
+                self.df[col] = np.nan
+            self.df.loc[predict_labels_df.index, col] = predict_labels_df[col].values
 
         #
         # 3. Signals
