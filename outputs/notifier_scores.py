@@ -16,6 +16,14 @@ import logging
 log = logging.getLogger('notifier')
 
 
+def _is_placeholder(val):
+    """Treat config placeholders as missing."""
+    if not val or not isinstance(val, str):
+        return True
+    s = val.strip()
+    return "<" in s or ">" in s or s.lower().startswith("your-") or s == ""
+
+
 async def send_score_notification(df, model: dict, config: dict, model_store: ModelStore):
     symbol = config["symbol"]
     freq = config["freq"]
@@ -78,7 +86,10 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
     )
 
     if not notification_is_needed:
-        return  # Nothing important happened: within the same band and same time interval
+        log.debug("Telegram skipped: no notification needed this run (band_no=%s, notify_every_run=%s)", band_no, model.get("notify_every_run"))
+        return
+
+    log.info("Telegram notifier: preparing message (score=%.3f, band_no=%s)", trade_score_primary, band_no)
 
     #
     # Build a message with parameters from the current band
@@ -115,17 +126,16 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
     #
     # Send notification
     #
-    bot_token = config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+    bot_token = (config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "")
+    chat_id = str(chat_id).strip()
 
-    if not bot_token or not chat_id:
+    if _is_placeholder(bot_token) or _is_placeholder(chat_id):
         log.error(
-            "Telegram not sent: missing telegram_bot_token or telegram_chat_id. "
-            "Set in config or env TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."
+            "Telegram not sent: telegram_bot_token or telegram_chat_id is missing or still a placeholder. "
+            "Set real values in config or export TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before starting the server (e.g. before pm2 start)."
         )
         return
-
-    chat_id = str(chat_id).strip()
 
     try:
         url = 'https://api.telegram.org/bot' + bot_token + '/sendMessage?chat_id=' + chat_id + '&parse_mode=markdown&text=' + message
@@ -133,8 +143,9 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
         response_json = response.json()
         if not response_json.get('ok'):
             log.error(
-                "Telegram API error: %s",
-                response_json.get("description", response_json),
+                "Telegram API error: %s (full response: %s)",
+                response_json.get("description", "unknown"),
+                response_json,
             )
         else:
             log.info("Telegram notification sent to chat_id=%s", chat_id[:8] + "..." if len(chat_id) > 8 else chat_id)
