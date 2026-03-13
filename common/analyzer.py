@@ -218,11 +218,12 @@ class Analyzer:
             predict_labels_df = pd.concat([predict_labels_df, fs_df], axis=1)
             predict_label_columns.extend(feats)
 
-        # Attach predicted label columns by index so 1-row (realtime) and N-row (batch) both work
+        # Attach predicted label columns by position (avoids duplicate-index length mismatch)
+        n = len(predict_labels_df)
         for col in predict_labels_df.columns:
             if col not in self.df.columns:
                 self.df[col] = np.nan
-            self.df.loc[predict_labels_df.index, col] = predict_labels_df[col].values
+            self.df.iloc[-n:, self.df.columns.get_loc(col)] = predict_labels_df[col].values
 
         #
         # 3. Signals
