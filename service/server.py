@@ -338,8 +338,14 @@ def start_server(config_file):
         if App.loop.is_running():
              App.loop.stop()
              log.info("Event loop stop requested.")
-        # Cancel WebSocket and other pending tasks so "Event loop is closed" is not raised
-        pending = asyncio.all_tasks(App.loop)
+        # Cancel WebSocket first so it closes cleanly and avoids "Task was destroyed but it is pending"
+        if getattr(App, "ws_task", None) and not App.ws_task.done():
+            App.ws_task.cancel()
+            try:
+                App.loop.run_until_complete(asyncio.wait_for(asyncio.shield(App.ws_task), timeout=3.0))
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+        pending = [t for t in asyncio.all_tasks(App.loop) if not t.done()]
         for t in pending:
             t.cancel()
         if pending:
