@@ -1,6 +1,8 @@
 import os
 import sys
+import json
 from datetime import timedelta, datetime
+from pathlib import Path
 
 import asyncio
 
@@ -38,92 +40,224 @@ async def trader_simulation(df, model: dict, config: dict, model_store: ModelSto
 
 async def generate_trader_transaction(df, model: dict, config: dict):
     """
-    Very simple trade strategy where we only buy and sell using the whole available amount
+    Trade with TP/SL: open on signal, close only when TP or SL is hit. No new signal until position closed.
+    TP/SL are ATR-based (or percentage fallback) from config tp_sl.
     """
-    symbol = config["symbol"]
     transaction_path = get_transaction_path()
-
     buy_signal_column = model.get("buy_signal_column")
     sell_signal_column = model.get("sell_signal_column")
+    tp_sl_cfg = model.get("tp_sl") or {}
 
     signal = get_signal(df, buy_signal_column, sell_signal_column)
     signal_side = signal.get("side")
     close_price = signal.get("close_price")
     close_time = signal.get("close_time")
 
-    # Previous transaction: BUY (we are currently selling) or SELL (we are currently buying)
-    if not App.transaction:
-        t_status = None
-        t_price = None
-    else:
-        t_status = App.transaction.get("status")
-        t_price = App.transaction.get("price")
-    if signal_side == "BUY" and (not t_status or t_status == "SELL"):
-        profit = t_price - close_price if t_price else 0.0
-        t_dict = dict(timestamp=str(close_time), price=close_price, profit=profit, status="BUY")
-    elif signal_side == "SELL" and (not t_status or t_status == "BUY"):
-        profit = close_price - t_price if t_price else 0.0
-        t_dict = dict(timestamp=str(close_time), price=close_price, profit=profit, status="SELL")
-    else:
+    row = df.iloc[-1]
+    high_price = float(row.get("high", close_price))
+    low_price = float(row.get("low", close_price))
+
+    position = load_position()
+
+    # --- 1) We have an open position: check TP/SL on this bar (high/low) ---
+    if position and position.get("open"):
+        side = position.get("side")  # "LONG" or "SHORT"
+        entry = position.get("entry_price")
+        tp_price = position.get("tp_price")
+        sl_price = position.get("sl_price")
+        entry_time = position.get("entry_time")
+
+        hit_tp, hit_sl = False, False
+        exit_price = close_price
+        if side == "LONG":
+            if high_price >= tp_price:
+                hit_tp = True
+                exit_price = tp_price
+            elif low_price <= sl_price:
+                hit_sl = True
+                exit_price = sl_price
+        else:  # SHORT
+            if low_price <= tp_price:
+                hit_tp = True
+                exit_price = tp_price
+            elif high_price >= sl_price:
+                hit_sl = True
+                exit_price = sl_price
+
+        if hit_tp or hit_sl:
+            if side == "LONG":
+                profit = exit_price - entry
+                status_close = "SELL"
+            else:
+                profit = entry - exit_price
+                status_close = "BUY"
+            profit_pct = 100.0 * profit / entry if entry else 0.0
+
+            # Append close to transaction log (same format as before for stats)
+            transaction_path.parent.mkdir(parents=True, exist_ok=True)
+            t_line = f"{close_time},{exit_price:.2f},{profit:.2f},{status_close}\n"
+            with open(transaction_path, "a") as f:
+                f.write(t_line)
+
+            clear_position()
+            App.transaction = dict(
+                timestamp=str(close_time), price=exit_price, profit=profit, status=status_close
+            )
+
+            log.info(f"Position closed: {side} @ {entry} -> {exit_price} ({'TP' if hit_tp else 'SL'}) PnL: {profit:.2f} ({profit_pct:.2f}%)")
+
+            return {
+                "status": "CLOSED",
+                "side": side,
+                "exit_reason": "TP" if hit_tp else "SL",
+                "entry_price": entry,
+                "entry_time": entry_time,
+                "exit_price": exit_price,
+                "close_time": close_time,
+                "profit": profit,
+                "profit_percent": profit_pct,
+                "win": hit_tp,
+            }
+        # Position still open: do not send a new signal
         return None
 
-    # Save this transaction
-    App.transaction = t_dict
-    transaction_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(transaction_path, 'a+') as f:
-        f.write(",".join([f"{v:.2f}" if isinstance(v, float) else str(v) for v in t_dict.values()]) + "\n")
+    # --- 2) No position: open on BUY/SELL signal with TP/SL ---
+    if signal_side not in ("BUY", "SELL"):
+        return None
 
-    log.info(f"Trade simulator transaction: {t_dict}")
+    atr_col = tp_sl_cfg.get("atr_column")
+    tp_mult = float(tp_sl_cfg.get("tp_atr_mult", 2.0))
+    sl_mult = float(tp_sl_cfg.get("sl_atr_mult", 1.5))
+    tp_pct = float(tp_sl_cfg.get("tp_pct_fallback", 0.5)) / 100.0
+    sl_pct = float(tp_sl_cfg.get("sl_pct_fallback", 0.3)) / 100.0
 
-    return t_dict
+    atr = None
+    if atr_col and atr_col in row.index:
+        try:
+            atr = float(row[atr_col])
+        except (TypeError, ValueError):
+            pass
+    if atr is None or atr <= 0:
+        atr = close_price * (tp_pct + sl_pct) / 2  # fallback distance
+
+    if signal_side == "BUY":
+        side = "LONG"
+        tp_price = close_price + atr * tp_mult
+        sl_price = close_price - atr * sl_mult
+    else:
+        side = "SHORT"
+        tp_price = close_price - atr * tp_mult
+        sl_price = close_price + atr * sl_mult
+
+    save_position({
+        "open": True,
+        "side": side,
+        "entry_price": close_price,
+        "entry_time": str(close_time),
+        "tp_price": tp_price,
+        "sl_price": sl_price,
+        "atr_at_entry": atr,
+    })
+
+    log.info(f"Position opened: {side} @ {close_price} TP={tp_price:.2f} SL={sl_price:.2f}")
+
+    return {
+        "status": "OPEN_LONG" if side == "LONG" else "OPEN_SHORT",
+        "side": side,
+        "price": close_price,
+        "tp_price": tp_price,
+        "sl_price": sl_price,
+        "close_time": close_time,
+    }
+
+
+def _send_telegram(bot_token, chat_id, text):
+    try:
+        import urllib.parse
+        url = "https://api.telegram.org/bot" + bot_token + "/sendMessage?chat_id=" + str(chat_id).strip() + "&parse_mode=markdown&text=" + urllib.parse.quote(text)
+        r = requests.get(url, timeout=10)
+        if not r.json().get("ok"):
+            log.error("Telegram send failed: %s", r.text)
+    except Exception as e:
+        log.error("Error sending Telegram: %s", e)
 
 
 async def send_transaction_message(transaction, config):
+    bot_token = (config.get("telegram_bot_token") or "").strip()
+    chat_id = str(config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
+    if not bot_token or not chat_id:
+        return
 
-    profit, profit_percent, profit_descr, profit_percent_descr = await generate_transaction_stats()
+    status = transaction.get("status")
 
-    if transaction.get("status") == "SELL":
+    # --- Position opened: send TP/SL ---
+    if status in ("OPEN_LONG", "OPEN_SHORT"):
+        side = transaction.get("side", "LONG")
+        price = transaction.get("price", 0)
+        tp = transaction.get("tp_price", 0)
+        sl = transaction.get("sl_price", 0)
+        emoji = "📈" if side == "LONG" else "📉"
+        msg = f"{emoji} *{side} opened*\nPrice: {price:,.2f}\nTP: {tp:,.2f}\nSL: {sl:,.2f}"
+        _send_telegram(bot_token, chat_id, msg)
+        return
+
+    # --- Position closed (TP or SL): send P&L and stats ---
+    if status == "CLOSED":
+        side = transaction.get("side", "")
+        exit_reason = transaction.get("exit_reason", "")
+        profit = transaction.get("profit", 0)
+        profit_pct = transaction.get("profit_percent", 0)
+        win = transaction.get("win", False)
+        entry_price = transaction.get("entry_price", 0)
+        exit_price = transaction.get("exit_price", 0)
+
+        res = "✅ TP" if win else "❌ SL"
+        msg = f"🔒 *{side} closed ({res})*\nEntry: {entry_price:,.2f} → Exit: {exit_price:,.2f}\nP&L: {profit:+,.2f} ({profit_pct:+.2f}%)"
+        _send_telegram(bot_token, chat_id, msg)
+
+        # Stats from transaction file (4 weeks): wins, losses, total P&L
+        try:
+            _, _, profit_descr, profit_percent_descr = await generate_transaction_stats()
+            n = int(profit_percent_descr.get("count", 0))
+            if n > 0:
+                # Win/loss counts from file (same type as this close: SELL=long, BUY=short)
+                tx_path = get_transaction_path()
+                tdf = pd.read_csv(tx_path, header=None, names=["timestamp", "price", "profit", "status"])
+                tdf["profit"] = pd.to_numeric(tdf["profit"], errors="coerce")
+                tdf = tdf.dropna(subset=["profit"])
+                recent = tdf.tail(4 * 7 * 24 * 2)  # rough 4 weeks of 1m bars, 2 trades/day max
+                same_side = recent[recent["status"] == ("SELL" if side == "LONG" else "BUY")]
+                wins = int((same_side["profit"] > 0).sum())
+                losses = int((same_side["profit"] < 0).sum())
+                total_pnl = same_side["profit"].sum()
+                msg2 = "📊 *Stats (4w)*\n"
+                msg2 += f"Wins: {wins} | Losses: {losses} | Total P&L: {total_pnl:+,.2f}\n"
+                msg2 += f"Mean: {profit_percent_descr.get('mean', 0):.2f}% | Min: {profit_percent_descr.get('min', 0):.2f}% | Max: {profit_percent_descr.get('max', 0):.2f}%"
+                _send_telegram(bot_token, chat_id, msg2)
+        except Exception as e:
+            log.debug("Stats for Telegram skipped: %s", e)
+        return
+
+    # Legacy: BUY/SELL without TP/SL (e.g. old config)
+    if status == "SELL":
         message = "⚡💰 *SOLD: "
-    elif transaction.get("status") == "BUY":
+    elif status == "BUY":
         message = "⚡💰 *BOUGHT: "
     else:
-        log.error(f"ERROR: Should not happen")
-
-    message += f" Profit: {profit_percent:.2f}% {profit:.2f}₮*"
-
-    bot_token = config["telegram_bot_token"]
-    chat_id = config["telegram_chat_id"]
-    try:
-        url = 'https://api.telegram.org/bot' + bot_token + '/sendMessage?chat_id=' + chat_id + '&parse_mode=markdown&text=' + message
-        response = requests.get(url)
-        response_json = response.json()
-        if not response_json.get('ok'):
-            log.error(f"Error sending notification.")
-    except Exception as e:
-        log.error(f"Error sending notification: {e}")
-
-    #
-    # Send stats about previous transactions (including this one)
-    #
-    if transaction.get("status") == "SELL":
-        message = "↗ *LONG transactions stats (4 weeks)*\n"
-    elif transaction.get("status") == "BUY":
-        message = "↘ *SHORT transactions stats (4 weeks)*\n"
-    else:
-        log.error(f"ERROR: Should not happen")
-
-    message += f"🔸sum={profit_percent_descr['count'] * profit_percent_descr['mean']:.2f}% 🔸count={int(profit_percent_descr['count'])}\n"
-    message += f"🔸mean={profit_percent_descr['mean']:.2f}% 🔸std={profit_percent_descr['std']:.2f}%\n"
-    message += f"🔸min={profit_percent_descr['min']:.2f}% 🔸median={profit_percent_descr['50%']:.2f}% 🔸max={profit_percent_descr['max']:.2f}%\n"
+        return
 
     try:
-        url = 'https://api.telegram.org/bot' + bot_token + '/sendMessage?chat_id=' + chat_id + '&parse_mode=markdown&text=' + message
-        response = requests.get(url)
-        response_json = response.json()
-        if not response_json.get('ok'):
-            log.error(f"Error sending notification.")
+        profit, profit_percent, profit_descr, profit_percent_descr = await generate_transaction_stats()
+        message += f" Profit: {profit_percent:.2f}% {profit:.2f}₮*"
+        _send_telegram(bot_token, chat_id, message)
+        if status == "SELL":
+            msg2 = "↗ *LONG stats (4w)*\n"
+        else:
+            msg2 = "↘ *SHORT stats (4w)*\n"
+        msg2 += f"count={int(profit_percent_descr['count'])} mean={profit_percent_descr['mean']:.2f}% min={profit_percent_descr['min']:.2f}% max={profit_percent_descr['max']:.2f}%"
+        _send_telegram(bot_token, chat_id, msg2)
     except Exception as e:
-        log.error(f"Error sending notification: {e}")
+        log.error("Error building legacy stats: %s", e)
 
 
 async def generate_transaction_stats():
@@ -244,3 +378,35 @@ def load_all_transactions():
 
 def get_transaction_path():
     return Path(App.config["data_folder"]) / App.config["symbol"] / "transactions.txt"
+
+
+def get_position_path():
+    return Path(App.config["data_folder"]) / App.config["symbol"] / "position.json"
+
+
+def load_position():
+    """Load open position state (entry, tp, sl). Returns None if no position."""
+    path = get_position_path()
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        if not data.get("open"):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def save_position(data):
+    path = get_position_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=0)
+
+
+def clear_position():
+    path = get_position_path()
+    if path.is_file():
+        path.unlink()

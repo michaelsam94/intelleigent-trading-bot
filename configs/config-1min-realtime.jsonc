@@ -79,6 +79,16 @@
                 {"edge": -0.015, "frequency": null, "sign": "〈〈〈📉", "bold": true, "text": "SELL ZONE"}
             ]
         }},
-        {"generator": "trader_simulation", "config": {"buy_signal_column": "buy_signal_column", "sell_signal_column": "sell_signal_column"}}
+        {"generator": "trader_simulation", "config": {
+            "buy_signal_column": "buy_signal_column",
+            "sell_signal_column": "sell_signal_column",
+            "tp_sl": {
+                "atr_column": "high_low_close_ATR_14",
+                "tp_atr_mult": 2.0,
+                "sl_atr_mult": 1.5,
+                "tp_pct_fallback": 0.5,
+                "sl_pct_fallback": 0.3
+            }
+        }}
     ]
 }

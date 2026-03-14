@@ -116,6 +116,12 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `output_sets` | array | Each item defines an output (e.g. Telegram, trader simulation). |
+| `trader_simulation.config.tp_sl` | object | **TP/SL**: no new signal until position closes at TP or SL. |
+| `tp_sl.atr_column` | string | Feature column for ATR (e.g. `"high_low_close_ATR_14"`). |
+| `tp_sl.tp_atr_mult` | number | Take-profit distance = ATR × this (e.g. `2.0`). |
+| `tp_sl.sl_atr_mult` | number | Stop-loss distance = ATR × this (e.g. `1.5`). |
+| `tp_sl.tp_pct_fallback` | number | If ATR missing, TP % (e.g. `0.5` = 0.5%). |
+| `tp_sl.sl_pct_fallback` | number | If ATR missing, SL % (e.g. `0.3`). |
 | `score_notification` | boolean | Enable Telegram score notifications. |
 | `notify_every_run` | boolean | `true` = every minute; `false` = only when band changes. |
 | `score_column_names` | array | Columns to include (e.g. `["trade_score"]`). |
