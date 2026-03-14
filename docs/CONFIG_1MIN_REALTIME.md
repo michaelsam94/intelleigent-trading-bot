@@ -116,6 +116,9 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `output_sets` | array | Each item defines an output (e.g. Telegram, trader simulation). |
+| `trader_simulation.config.starting_balance` | number | Starting margin in USD (e.g. `10`). Used for P&L stats and Telegram. |
+| `trader_simulation.config.leverage` | number | Leverage (e.g. `20`). Margin P&L % = price P&L % × leverage. |
+| `trader_simulation.config.fee_bps_per_side` | number | Fee in basis points per side (e.g. `4` = 0.04%). Applied open + close. |
 | `trader_simulation.config.tp_sl` | object | **TP/SL**: no new signal until position closes at TP or SL. |
 | `tp_sl.atr_column` | string | Feature column for ATR (e.g. `"high_low_close_ATR_14"`). |
 | `tp_sl.tp_atr_mult` | number | Take-profit distance = ATR × this (e.g. `2.0`). |

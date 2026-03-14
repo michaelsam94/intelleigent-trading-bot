@@ -93,6 +93,18 @@ async def generate_trader_transaction(df, model: dict, config: dict):
                 status_close = "BUY"
             profit_pct = 100.0 * profit / entry if entry else 0.0
 
+            # Leverage and fees (margin-based stats)
+            leverage = float(model.get("leverage", 20))
+            fee_bps = float(model.get("fee_bps_per_side", 4))
+            balance_before, starting_balance = load_balance(model)
+            leveraged_pnl_pct = profit_pct * leverage
+            fee_margin_pct = 2 * (fee_bps / 10000.0) * leverage * 100.0  # fee as % of margin (open+close on notional)
+            balance_after = balance_before * (1.0 + leveraged_pnl_pct / 100.0 - fee_margin_pct / 100.0)
+            balance_after = max(0.01, balance_after)  # avoid zero
+            save_balance(balance_after, starting_balance)
+            fee_usd = balance_before * (fee_margin_pct / 100.0)
+            total_return_pct = 100.0 * (balance_after - starting_balance) / starting_balance if starting_balance else 0.0
+
             # Append close to transaction log (same format as before for stats)
             transaction_path.parent.mkdir(parents=True, exist_ok=True)
             t_line = f"{close_time},{exit_price:.2f},{profit:.2f},{status_close}\n"
@@ -104,7 +116,7 @@ async def generate_trader_transaction(df, model: dict, config: dict):
                 timestamp=str(close_time), price=exit_price, profit=profit, status=status_close
             )
 
-            log.info(f"Position closed: {side} @ {entry} -> {exit_price} ({'TP' if hit_tp else 'SL'}) PnL: {profit:.2f} ({profit_pct:.2f}%)")
+            log.info(f"Position closed: {side} @ {entry} -> {exit_price} ({'TP' if hit_tp else 'SL'}) PnL: {profit:.2f} ({profit_pct:.2f}%) | Balance: ${balance_after:.2f}")
 
             return {
                 "status": "CLOSED",
@@ -117,6 +129,13 @@ async def generate_trader_transaction(df, model: dict, config: dict):
                 "profit": profit,
                 "profit_percent": profit_pct,
                 "win": hit_tp,
+                "leveraged_pnl_pct": leveraged_pnl_pct,
+                "fee_margin_pct": fee_margin_pct,
+                "fee_usd": fee_usd,
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+                "starting_balance": starting_balance,
+                "total_return_pct": total_return_pct,
             }
         # Position still open: do not send a new signal
         return None
@@ -201,7 +220,7 @@ async def send_transaction_message(transaction, config):
         _send_telegram(bot_token, chat_id, msg)
         return
 
-    # --- Position closed (TP or SL): send P&L and stats ---
+    # --- Position closed (TP or SL): send P&L with leverage/fees and stats ---
     if status == "CLOSED":
         side = transaction.get("side", "")
         exit_reason = transaction.get("exit_reason", "")
@@ -210,29 +229,33 @@ async def send_transaction_message(transaction, config):
         win = transaction.get("win", False)
         entry_price = transaction.get("entry_price", 0)
         exit_price = transaction.get("exit_price", 0)
+        leveraged_pnl_pct = transaction.get("leveraged_pnl_pct", profit_pct)
+        fee_usd = transaction.get("fee_usd", 0)
+        balance_after = transaction.get("balance_after", 0)
+        starting_balance = transaction.get("starting_balance", 0)
+        total_return_pct = transaction.get("total_return_pct", 0)
 
         res = "✅ TP" if win else "❌ SL"
-        msg = f"🔒 *{side} closed ({res})*\nEntry: {entry_price:,.2f} → Exit: {exit_price:,.2f}\nP&L: {profit:+,.2f} ({profit_pct:+.2f}%)"
+        msg = f"🔒 *{side} closed ({res})*\nEntry: {entry_price:,.2f} → Exit: {exit_price:,.2f}\n"
+        msg += f"Price P&L: {profit_pct:+.2f}% → Margin: {leveraged_pnl_pct:+.2f}% | Fee: ${fee_usd:.2f}\n"
+        msg += f"Balance: ${balance_after:.2f} | Total return: {total_return_pct:+.1f}%"
         _send_telegram(bot_token, chat_id, msg)
 
-        # Stats from transaction file (4 weeks): wins, losses, total P&L
+        # Stats: wins, losses, total P&L $, total return %
         try:
-            _, _, profit_descr, profit_percent_descr = await generate_transaction_stats()
-            n = int(profit_percent_descr.get("count", 0))
-            if n > 0:
-                # Win/loss counts from file (same type as this close: SELL=long, BUY=short)
-                tx_path = get_transaction_path()
+            tx_path = get_transaction_path()
+            if tx_path.is_file():
                 tdf = pd.read_csv(tx_path, header=None, names=["timestamp", "price", "profit", "status"])
                 tdf["profit"] = pd.to_numeric(tdf["profit"], errors="coerce")
                 tdf = tdf.dropna(subset=["profit"])
-                recent = tdf.tail(4 * 7 * 24 * 2)  # rough 4 weeks of 1m bars, 2 trades/day max
-                same_side = recent[recent["status"] == ("SELL" if side == "LONG" else "BUY")]
-                wins = int((same_side["profit"] > 0).sum())
-                losses = int((same_side["profit"] < 0).sum())
-                total_pnl = same_side["profit"].sum()
-                msg2 = "📊 *Stats (4w)*\n"
-                msg2 += f"Wins: {wins} | Losses: {losses} | Total P&L: {total_pnl:+,.2f}\n"
-                msg2 += f"Mean: {profit_percent_descr.get('mean', 0):.2f}% | Min: {profit_percent_descr.get('min', 0):.2f}% | Max: {profit_percent_descr.get('max', 0):.2f}%"
+                recent = tdf.tail(500)  # last N closed trades
+                wins = int((recent["profit"] > 0).sum())
+                losses = int((recent["profit"] < 0).sum())
+                total_pnl_usd = recent["profit"].sum()  # price P&L; for margin we use balance
+                msg2 = "📊 *Session stats*\n"
+                msg2 += f"Wins: {wins} | Losses: {losses}\n"
+                msg2 += f"Balance: ${balance_after:.2f} (start ${starting_balance:.2f})\n"
+                msg2 += f"Total return: {total_return_pct:+.1f}%"
                 _send_telegram(bot_token, chat_id, msg2)
         except Exception as e:
             log.debug("Stats for Telegram skipped: %s", e)
@@ -410,3 +433,28 @@ def clear_position():
     path = get_position_path()
     if path.is_file():
         path.unlink()
+
+
+def get_balance_path():
+    return Path(App.config["data_folder"]) / App.config["symbol"] / "balance.json"
+
+
+def load_balance(model: dict):
+    """Current margin balance. If no file, init from config starting_balance."""
+    path = get_balance_path()
+    start = float(model.get("starting_balance", 10.0))
+    if not path.is_file():
+        return start, start
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return float(data.get("balance", start)), float(data.get("starting_balance", start))
+    except Exception:
+        return start, start
+
+
+def save_balance(balance: float, starting_balance: float):
+    path = get_balance_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"balance": balance, "starting_balance": starting_balance}, f)

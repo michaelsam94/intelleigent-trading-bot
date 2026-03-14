@@ -82,6 +82,9 @@
         {"generator": "trader_simulation", "config": {
             "buy_signal_column": "buy_signal_column",
             "sell_signal_column": "sell_signal_column",
+            "starting_balance": 10,
+            "leverage": 20,
+            "fee_bps_per_side": 4,
             "tp_sl": {
                 "atr_column": "high_low_close_ATR_14",
                 "tp_atr_mult": 2.0,
