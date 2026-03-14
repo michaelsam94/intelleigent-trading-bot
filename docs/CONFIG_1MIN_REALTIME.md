@@ -145,3 +145,4 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Realtime mode | `use_websocket`: true, `freq`: 1min |
 | Feature families | Trend (SMA, EMA, LINEARREG_SLOPE), Momentum (RSI, ROC, MOM), Volatility (STDDEV, ATR), Volume (OBV, MFI) |
 | Algorithms | `lc` (LogisticRegression) + `gb` (LightGBM). Combine uses `lc` by default; switch to `gb` when both label classes exist. |
+| **60k bars for training** | 1) Download 60+ days: `download_start_days: 60` (≈86k 1m bars). 2) Merge with train length: `python -m scripts.merge -c configs/config-1min-realtime.jsonc --train` (keeps 60,240 rows). 3) Run features, labels, train. Keep `train: false` in config for the server. |

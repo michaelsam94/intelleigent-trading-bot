@@ -15,7 +15,8 @@ Create one output file from multiple input data files.
 
 @click.command()
 @click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
-def main(config_file):
+@click.option('--train/--predict', 'for_train', default=None, help='Use train_length (60k) or predict_length (288). Default: from config train')
+def main(config_file, for_train):
     load_config(config_file)
     config = App.config
 
@@ -26,8 +27,8 @@ def main(config_file):
     symbol = config["symbol"]
     data_path = Path(config["data_folder"])
 
-    # Determine desired data length depending on train/predict mode
-    is_train = config.get("train")
+    # Determine desired data length: --train => train_length (60k bars), else predict_length
+    is_train = for_train if for_train is not None else config.get("train")
     if is_train:
         window_size = config.get("train_length")
     else:
@@ -35,6 +36,7 @@ def main(config_file):
     features_horizon = config.get("features_horizon")
     if window_size:
         window_size += features_horizon
+    print(f"Merge mode: {'train' if is_train else 'predict'} (keeping last {window_size or 'all'} rows)")
 
     #
     # Load data from multiple sources and merge
