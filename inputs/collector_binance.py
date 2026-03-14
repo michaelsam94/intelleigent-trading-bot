@@ -301,12 +301,12 @@ def download_klines(config, data_sources):
 
             print(f"File found. Downloaded data for {quote} and {freq} since {str(latest_ts)} will be appended to the existing file {file_name}")
         else:
-            # No existing data so we will download all available data and store as a new file
+            # No existing data: limit first download to avoid hours of API calls (1m from 2017 = 100k+ requests)
             df = None
+            start_days = config.get("download_start_days", 60)  # default 60 days for manageable first run
+            oldest_point = latest_ts - timedelta(days=start_days)
 
-            oldest_point = datetime(2017, 1, 1)
-
-            print(f"File not found. All data will be downloaded and stored in newly created file for {quote} and {freq}.")
+            print(f"File not found. Downloading from {oldest_point.date()} to now (~{start_days} days). This may take a few minutes.")
 
         #delta_minutes = (latest_ts - oldest_point).total_seconds() / 60
         #binsizes = {"1m": 1, "5m": 5, "1h": 60, "1d": 1440}

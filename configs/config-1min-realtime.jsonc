@@ -17,6 +17,7 @@
     "predict_length": 288,
     "append_overlap_records": 5,
 
+    "download_start_days": 60,
     "data_sources": [
         {"folder": "BTCUSDT", "file": "klines", "column_prefix": ""}
     ],

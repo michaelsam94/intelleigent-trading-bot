@@ -52,6 +52,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `download_start_days` | number | When no klines file exists, first download starts this many days before now. Default `60`. Avoids a multi-hour full-history download. |
 | `data_sources` | array | Each item: `folder` (symbol folder), `file` (base filename), `column_prefix` (optional). |
 
 ---
