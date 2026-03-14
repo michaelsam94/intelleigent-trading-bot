@@ -5,7 +5,7 @@ import math, time
 from datetime import datetime, timedelta
 from dateutil import parser
 from decimal import *
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Dict, Optional
 from pathlib import Path
 
 import pandas as pd
@@ -59,7 +59,7 @@ def get_client():
 def close_client():
     client.close_connection()
 
-async def fetch_klines(config: dict, start_from_dt) -> dict[str, pd.DataFrame] | None:
+async def fetch_klines(config: dict, start_from_dt) -> Optional[Dict[str, pd.DataFrame]]:
     """
     Retrieve and return latest data from binance client.
 
