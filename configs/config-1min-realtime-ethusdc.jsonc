@@ -6,8 +6,8 @@
     "telegram_bot_token": "<your-telegram-bot-token>",
     "telegram_chat_id": "<your-telegram-chat-id>",
     "data_folder": "./data",
-    "symbol": "BTCUSDC",
-    "description": "BTCUSDC 1min realtime, predict next 15 min",
+    "symbol": "ETHUSDC",
+    "description": "ETHUSDC 1min realtime, predict next 15 min",
     "freq": "1min",
     "use_websocket": true,
 
@@ -19,7 +19,7 @@
 
     "download_start_days": 60,
     "data_sources": [
-        {"folder": "BTCUSDC", "file": "klines", "column_prefix": ""}
+        {"folder": "ETHUSDC", "file": "klines", "column_prefix": ""}
     ],
 
     "feature_sets": [
