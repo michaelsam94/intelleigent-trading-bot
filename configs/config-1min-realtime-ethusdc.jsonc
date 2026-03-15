@@ -88,7 +88,7 @@
             "fee_bps_per_side": 4,
             "tp_sl": {
                 "atr_column": "high_low_close_ATR_14",
-                "tp_atr_mult": 3.0,
+                "tp_atr_mult": 4.0,
                 "sl_atr_mult": 1.5,
                 "tp_pct_fallback": 0.15,
                 "sl_pct_fallback": 0.1
