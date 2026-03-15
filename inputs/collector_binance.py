@@ -86,8 +86,8 @@ async def fetch_klines(config: dict, start_from_dt) -> Optional[Dict[str, pd.Dat
 
     # Create a list of tasks for retrieving data
     missing_klines_counts = [request_count for sym in symbols]
-    #coros = [request_symbol_klines(sym, "1m", 5) for sym in symbols]
-    tasks = [asyncio.create_task(request_symbol_klines(s, freq, c)) for c, s in zip(missing_klines_counts, symbols)]
+    use_futures = config.get("binance_futures", False)
+    tasks = [asyncio.create_task(request_symbol_klines(s, freq, c, use_futures)) for c, s in zip(missing_klines_counts, symbols)]
 
     results = {}
     timeout = 10  # Seconds to wait for the result
@@ -119,7 +119,7 @@ async def fetch_klines(config: dict, start_from_dt) -> Optional[Dict[str, pd.Dat
 
     return results
 
-async def request_symbol_klines(symbol, freq, limit: int):
+async def request_symbol_klines(symbol, freq, limit: int, use_futures: bool = False):
     """
     Request klines data from the service for one symbol.
     Maximum the specified number of klines will be returned.
@@ -127,6 +127,7 @@ async def request_symbol_klines(symbol, freq, limit: int):
     :param symbol:
     :param freq: pandas frequency like '1min' which is supported by Binance API
     :param limit: desired and maximum number of klines
+    :param use_futures: if True, use futures_klines / futures_historical_klines (USD-M)
     :return: Dict with the symbol as a key and a list of klines as a value. One kline is also a list.
     """
     klines_per_request = 400  # Limitation of API
@@ -137,20 +138,23 @@ async def request_symbol_klines(symbol, freq, limit: int):
     binance_freq = binance_freq_from_pandas(freq)
     interval_length_ms = pandas_interval_length_ms(freq)
 
+    get_klines_fn = client.futures_klines if use_futures else client.get_klines
+    get_historical_fn = client.futures_historical_klines if use_futures else client.get_historical_klines
+
     try:
         if limit <= klines_per_request:  # Server will return these number of klines in one request
             # INFO:
             # - startTime: include all intervals (ids) with same or greater id: if within interval then excluding this interval; if is equal to open time then include this interval
             # - endTime: include all intervals (ids) with same or smaller id: if equal to left border then return this interval, if within interval then return this interval
             # - It will return also incomplete current interval (in particular, we could collect approximate klines for higher frequencies by requesting incomplete intervals)
-            klines = client.get_klines(symbol=symbol, interval=binance_freq, limit=limit, endTime=now_ts)
+            klines = get_klines_fn(symbol=symbol, interval=binance_freq, limit=limit, endTime=now_ts)
             # Return: list of lists, that is, one kline is a list (not dict) with items ordered: timestamp, open, high, low, close etc.
         else:
             # https://sammchardy.github.io/binance/2018/01/08/historical-data-download-binance.html
             # get_historical_klines(symbol, interval, start_str, end_str=None, limit=500)
             # Find start from the number of records and frequency (interval length in milliseconds)
             request_start_ts = now_ts - interval_length_ms * (limit+1)
-            klines = client.get_historical_klines(symbol=symbol, interval=binance_freq, start_str=request_start_ts, end_str=now_ts)
+            klines = get_historical_fn(symbol=symbol, interval=binance_freq, start_str=request_start_ts, end_str=now_ts)
     except BinanceRequestException as bre:
         # {"code": 1103, "msg": "An unknown parameter was sent"}
         log.error(f"BinanceRequestException while requesting klines: {bre}")
@@ -275,6 +279,10 @@ def download_klines(config, data_sources):
         client.PRIVATE_API_VERSION = "v1"
         client.PUBLIC_API_VERSION = "v1"
 
+    # Use futures-specific methods when binance_futures is True (python-binance uses different endpoints)
+    get_latest_klines = client.futures_klines if futures else client.get_klines
+    get_historical_klines_fn = client.futures_historical_klines if futures else client.get_historical_klines
+
     for ds in data_sources:
         # Assumption: folder name is equal to the symbol name we want to download
         quote = ds.get("folder")
@@ -290,7 +298,7 @@ def download_klines(config, data_sources):
         file_name = (file_path / ("futures" if futures else "klines")).with_suffix(".csv")
 
         # Get a few latest klines to determine the latest available timestamp
-        latest_klines = client.get_klines(symbol=quote, interval=freq, limit=5)
+        latest_klines = get_latest_klines(symbol=quote, interval=freq, limit=5)
         latest_ts = pd.to_datetime(latest_klines[-1][0], unit='ms', utc=True)
 
         if file_name.is_file():
@@ -317,7 +325,7 @@ def download_klines(config, data_sources):
         #delta_lines = math.ceil(delta_minutes / binsizes[freq])
 
         # === Download from the remote server using binance client
-        klines = client.get_historical_klines(
+        klines = get_historical_klines_fn(
             symbol=quote,
             interval=freq,
             start_str=oldest_point.isoformat(),
