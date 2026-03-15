@@ -257,6 +257,20 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
                 else:
                     out = fn(**args)
 
+                # Multi-output (e.g. MACD returns macd, signal, hist)
+                if isinstance(out, (tuple, list)) and len(out) > 1:
+                    multi_names = (
+                        names if isinstance(names, list) and len(names) == len(out)
+                        else [f"{col_out_names}_{func_name}_{i}" for i in range(len(out))]
+                    )
+                    for i, o in enumerate(out):
+                        s = pd.Series(o, index=df.index, dtype=float) if not isinstance(o, pd.Series) else o.copy()
+                        s.name = multi_names[i]
+                        fn_out_names.append(multi_names[i])
+                        fn_outs.append(s)
+                    # Skip single-output naming and append below
+                    out = None
+
             #
             # Online: In a loop, compute the specified number of single values for the manually prepared windows
             #
@@ -292,31 +306,29 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
                 out.iloc[-last_rows:] = list(reversed(out_values))  # Assign values to the last elements
 
             #
-            # Name of the output column
+            # Name of the output column (single-output only; multi-output already appended above)
             #
-            # Now combin[e: columnnames + functionname + [if prefix null window [i] | elif prefix str + window[i] | else if list prefix[i]]
-            if not w:
-                if not names:
-                    out_name = f"{col_out_names}_{func_name}"
-                elif isinstance(names, str):
-                    out_name = names
-                elif isinstance(names, list):
-                    out_name = names[j]  # Should not happen
-            else:
-                out_name = f"{col_out_names}_{func_name}_"
-                win_name = str(w)
-                if not names:
-                    out_name = out_name + win_name
-                elif isinstance(names, str):
-                    out_name = out_name + names + "_" + win_name
-                elif isinstance(names, list):
-                    out_name = out_name + names[j]
+            if out is not None:
+                if not w:
+                    if not names:
+                        out_name = f"{col_out_names}_{func_name}"
+                    elif isinstance(names, str):
+                        out_name = names
+                    elif isinstance(names, list):
+                        out_name = names[j]  # Should not happen
+                else:
+                    out_name = f"{col_out_names}_{func_name}_"
+                    win_name = str(w)
+                    if not names:
+                        out_name = out_name + win_name
+                    elif isinstance(names, str):
+                        out_name = out_name + names + "_" + win_name
+                    elif isinstance(names, list):
+                        out_name = out_name + names[j]
 
-            fn_out_names.append(out_name)
-
-            out.name = out_name
-
-            fn_outs.append(out)
+                fn_out_names.append(out_name)
+                out.name = out_name
+                fn_outs.append(out)
 
         # Convert to relative values and percentage (except for the last output)
         fn_outs = _convert_to_relative(fn_outs, rel_base, rel_func, percentage)

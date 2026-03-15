@@ -66,7 +66,8 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `feature_sets[].generator` | string | Generator type: `"talib"` for TA-Lib. |
 | `feature_sets[].config.columns` | array | Columns used (e.g. `["close"]`). |
 | `feature_sets[].config.functions` | array | TA-Lib functions: `SMA`, `LINEARREG_SLOPE`, `STDDEV`. |
-| `feature_sets[].config.windows` | array | Window sizes (e.g. `[1, 5, 10, 15, 60]`). |
+| `feature_sets[].config.windows` | array | Window sizes (e.g. `[1, 5, 10, 15, 60]`). Use `[0]` for no window (e.g. MACD, ADOSC). Volume: we use ADOSC (Chaikin A/D oscillator) instead of VWAP so all TA-Lib builds work; VWAP often needs intraday reset logic. |
+| `feature_sets[].config.names` | array | Optional. For multi-output functions (e.g. MACD), custom column names. If omitted, outputs are named `{columns}_{function}_0`, `_1`, `_2` (e.g. `close_MACD_0`, `close_MACD_1`, `close_MACD_2`). |
 
 ---
 
@@ -125,6 +126,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `tp_sl.atr_column` | string | Feature column for ATR (e.g. `"high_low_close_ATR_14"`). |
 | `tp_sl.tp_atr_mult` | number | Take-profit distance = ATR × this (e.g. `2.0`). |
 | `tp_sl.sl_atr_mult` | number | Stop-loss distance = ATR × this (e.g. `1.5`). |
+| `tp_sl.trailing_atr_mult` | number | Optional. If set, trailing stop locks profits: stop moves to (best price − ATR × this) for LONG, (best price + ATR × this) for SHORT. |
 | `tp_sl.tp_pct_fallback` | number | If ATR missing, TP % (e.g. `0.5` = 0.5%). |
 | `tp_sl.sl_pct_fallback` | number | If ATR missing, SL % (e.g. `0.3`). |
 | `score_notification` | boolean | Enable Telegram score notifications. |
@@ -148,7 +150,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Buy/sell thresholds | `signal_sets` → `buy_signal_threshold`: 0.015, `sell_signal_threshold`: -0.015 |
 | Telegram frequency | `notify_every_run`: false → only on band change |
 | Realtime mode | `use_websocket`: true, `freq`: 1min |
-| Feature families | Trend (SMA, EMA, LINEARREG_SLOPE), Momentum (RSI, ROC, MOM), Volatility (STDDEV, ATR), Volume (OBV, MFI) |
+| Feature families | Trend (SMA, EMA, LINEARREG_SLOPE), Momentum (RSI, ROC, MOM, MACD), Volatility (STDDEV, ATR), Volume (OBV, MFI, ADOSC) |
 | Algorithms | `lc` (LogisticRegression) + `gb` (LightGBM). Combine uses `lc` by default; switch to `gb` when both label classes exist. |
 | **60k bars for training** | 1) Download 60+ days: `download_start_days: 60` (≈86k 1m bars). 2) Merge with train length: `python -m scripts.merge -c configs/config-1min-realtime.jsonc --train` (keeps 60,240 rows). 3) Run features, labels, train. Keep `train: false` in config for the server. |
 | **Walk-forward retrain** | Retrain every **7–14 days** so the model adapts to regime changes. Check label balance in `scripts/train.py` output before training; if a label is &lt;20% or &gt;80% True, consider adjusting thresholds or data window. |

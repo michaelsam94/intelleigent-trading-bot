@@ -59,13 +59,31 @@ async def generate_trader_transaction(df, model: dict, config: dict):
 
     position = load_position()
 
-    # --- 1) We have an open position: check TP/SL on this bar (high/low) ---
+    # --- 1) We have an open position: check TP/SL (and trailing stop) on this bar (high/low) ---
     if position and position.get("open"):
         side = position.get("side")  # "LONG" or "SHORT"
         entry = position.get("entry_price")
         tp_price = position.get("tp_price")
         sl_price = position.get("sl_price")
         entry_time = position.get("entry_time")
+        atr_at_entry = position.get("atr_at_entry") or 0.0
+
+        # Trailing stop: lock profits as price moves in our favor
+        trailing_mult = tp_sl_cfg.get("trailing_atr_mult")
+        if trailing_mult is not None and atr_at_entry > 0:
+            trail_dist = float(trailing_mult) * atr_at_entry
+            best = position.get("best_price")
+            if side == "LONG":
+                best = max(best if best is not None else entry, high_price)
+                trailing_sl = best - trail_dist
+                sl_price = max(sl_price, trailing_sl)  # effective SL
+                position["best_price"] = best
+            else:  # SHORT
+                best = min(best if best is not None else entry, low_price)
+                trailing_sl = best + trail_dist
+                sl_price = min(sl_price, trailing_sl)  # effective SL
+                position["best_price"] = best
+            save_position(position)
 
         hit_tp, hit_sl = False, False
         exit_price = close_price

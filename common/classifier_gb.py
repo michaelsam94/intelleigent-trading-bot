@@ -35,6 +35,16 @@ def train_gb(df_X, df_y, model_config: dict):
 
     y_train = df_y.values
 
+    # Optional validation split for early stopping (last 10% of rows, temporal)
+    valid_sets = None
+    if early_stopping_rounds is not None and early_stopping_rounds > 0 and len(X_train) > 100:
+        split = max(1, int(len(X_train) * 0.9))
+        X_valid = X_train[split:]
+        y_valid = y_train[split:]
+        X_train = X_train[:split]
+        y_train = y_train[:split]
+        valid_sets = [lgbm.Dataset(X_valid, y_valid)]
+
     #
     # Create model
     #
@@ -45,6 +55,7 @@ def train_gb(df_X, df_y, model_config: dict):
     max_depth = train_conf.get("max_depth")
     learning_rate = train_conf.get("learning_rate")
     num_boost_round = train_conf.get("num_boost_round")
+    early_stopping_rounds = train_conf.get("early_stopping_rounds")
 
     lambda_l1 = train_conf.get("lambda_l1")
     lambda_l2 = train_conf.get("lambda_l2")
@@ -79,14 +90,14 @@ def train_gb(df_X, df_y, model_config: dict):
         'verbosity': -1,  # Suppress "No further splits with positive gain" / "no more leaves" warnings
     }
 
-    model = lgbm.train(
-        lgbm_params,
+    call_kw = dict(
         train_set=lgbm.Dataset(X_train, y_train),
         num_boost_round=num_boost_round,
-        #valid_sets=[lgbm.Dataset(X_validate, y_validate)],
-        #early_stopping_rounds=int(num_boost_round / 5),
-        #verbose_eval=100,
     )
+    if valid_sets is not None:
+        call_kw["valid_sets"] = valid_sets
+        call_kw["callbacks"] = [lgbm.early_stopping(early_stopping_rounds, verbose=False)]
+    model = lgbm.train(lgbm_params, **call_kw)
 
     return (model, scaler)
 
