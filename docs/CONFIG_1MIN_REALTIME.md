@@ -108,7 +108,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `signal_sets` | array | Each item defines a signal generator. |
 | `signal_sets[].generator` | string | `"combine"` or `"threshold_rule"`. |
 | `"combine"` config | | `columns`: `["high_20_lc", "low_20_lc"]`, `names`: `"trade_score"`, `combine`: `"difference"`. |
-| `"threshold_rule"` config | | `columns`: `"trade_score"`, `parameters.buy_signal_threshold`: `0.015`, `parameters.sell_signal_threshold`: `-0.015`. |
+| `"threshold_rule"` config | | `columns`: `"trade_score"`, `parameters.buy_signal_threshold`: `0.015`, `parameters.sell_signal_threshold`: `-0.015`. Optional `consecutive_bars`: require this many consecutive bars above/below threshold before opening (e.g. `2` reduces false entries). |
 
 ---
 
@@ -120,6 +120,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `trader_simulation.config.starting_balance` | number | Starting margin in USD (e.g. `10`). Used for P&L stats and Telegram. |
 | `trader_simulation.config.leverage` | number | Leverage (e.g. `20`). Margin P&L % = price P&L % × leverage. |
 | `trader_simulation.config.fee_bps_per_side` | number | Fee in basis points per side (e.g. `4` = 0.04%). Applied open + close. |
+| `trader_simulation.config.daily_drawdown_limit_pct` | number | Optional. If set (e.g. `5`), stop opening new trades for the rest of the day once daily P&amp;L (from start of day) reaches this loss %. Resets at midnight. |
 | `trader_simulation.config.tp_sl` | object | **TP/SL**: no new signal until position closes at TP or SL. |
 | `tp_sl.atr_column` | string | Feature column for ATR (e.g. `"high_low_close_ATR_14"`). |
 | `tp_sl.tp_atr_mult` | number | Take-profit distance = ATR × this (e.g. `2.0`). |
@@ -150,5 +151,6 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Feature families | Trend (SMA, EMA, LINEARREG_SLOPE), Momentum (RSI, ROC, MOM), Volatility (STDDEV, ATR), Volume (OBV, MFI) |
 | Algorithms | `lc` (LogisticRegression) + `gb` (LightGBM). Combine uses `lc` by default; switch to `gb` when both label classes exist. |
 | **60k bars for training** | 1) Download 60+ days: `download_start_days: 60` (≈86k 1m bars). 2) Merge with train length: `python -m scripts.merge -c configs/config-1min-realtime.jsonc --train` (keeps 60,240 rows). 3) Run features, labels, train. Keep `train: false` in config for the server. |
+| **Walk-forward retrain** | Retrain every **7–14 days** so the model adapts to regime changes. Check label balance in `scripts/train.py` output before training; if a label is &lt;20% or &gt;80% True, consider adjusting thresholds or data window. |
 | **BTCUSDC + ETHUSDC** | Run **two processes** (one config per pair). **PM2:** from project root run `pm2 start ecosystem.config.cjs` (starts both). Or CLI: `pm2 start python --name server-btcusdc --interpreter none -- -m service.server -c configs/config-1min-realtime.jsonc` then same for `config-1min-realtime-ethusdc.jsonc` with `--name server-ethusdc`. |
 | **Backtesting (simulate)** | `scripts/simulate` needs `data/<SYMBOL>/signals.csv`. That file is produced by the pipeline. From project root run `./scripts/run_pipeline_to_signals.sh configs/config-1min-realtime.jsonc` (set `"train": true` in the config for the train step, then set back to `false` for the server). Then run `python -m scripts.simulate -c configs/config-1min-realtime.jsonc`. |

@@ -58,7 +58,7 @@
 
     "signal_sets": [
         {"generator": "combine", "config": {"columns": ["high_20_05_lc", "low_20_05_lc"], "names": "trade_score", "combine": "difference", "coefficient": 1.0, "constant": 0.0}},
-        {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "parameters": {"buy_signal_threshold": 0.015, "sell_signal_threshold": -0.015}}}
+        {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "consecutive_bars": 2, "parameters": {"buy_signal_threshold": 0.015, "sell_signal_threshold": -0.015}}}
     ],
 
     "output_sets": [
@@ -86,6 +86,7 @@
             "leverage": 20,
             "fee_bps_per_side": 4,
             "reset_balance_on_restart": true,
+            "daily_drawdown_limit_pct": 5,
             "tp_sl": {
                 "atr_column": "high_low_close_ATR_14",
                 "tp_atr_mult": 4.0,

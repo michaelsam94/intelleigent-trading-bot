@@ -106,6 +106,15 @@ def main(config_file):
     df = df.reset_index(drop=True)  # To remove gaps in index before use
 
     #
+    # Label balance check (Tier 1: avoid biased models)
+    #
+    for label in labels_all:
+        pct_true = (df[label] == 1).mean() * 100.0
+        print(f"Label balance '{label}': {pct_true:.1f}% True")
+        if pct_true < 20.0 or pct_true > 80.0:
+            print(f"WARNING: '{label}' is highly imbalanced ({pct_true:.1f}% True). Model may be biased. Consider different thresholds or more data.")
+
+    #
     # Train feature models
     #
     train_feature_sets = config.get("train_feature_sets", [])

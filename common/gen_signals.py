@@ -175,7 +175,7 @@ def compute_score_slope(df, model, buy_score_columns_in, sell_score_columns_in):
 def generate_threshold_rule(df, config):
     """
     Apply rules based on thresholds and generate trade signal buy, sell or do nothing.
-
+    If consecutive_bars > 1, require that many consecutive bars above/below threshold (reduces false entries).
     Returns signals in two pre-defined columns: 'buy_signal_column' and 'sell_signal_column'
     """
     parameters = config.get("parameters", {})
@@ -183,16 +183,29 @@ def generate_threshold_rule(df, config):
     columns = config.get("columns")
     if not columns:
         raise ValueError(f"The 'columns' parameter must be a non-empty string. {type(columns)}")
-    elif isinstance(columns, list):
-        columns = [columns]
+    if isinstance(columns, list):
+        score_col = columns[0]
+    else:
+        score_col = columns
 
     buy_signal_column = config.get("names")[0]
     sell_signal_column = config.get("names")[1]
+    consecutive_bars = int(config.get("consecutive_bars", 1))
+    if consecutive_bars < 1:
+        consecutive_bars = 1
 
-    df[buy_signal_column] = \
-        (df[columns] >= parameters.get("buy_signal_threshold"))
-    df[sell_signal_column] = \
-        (df[columns] <= parameters.get("sell_signal_threshold"))
+    buy_thresh = parameters.get("buy_signal_threshold")
+    sell_thresh = parameters.get("sell_signal_threshold")
+
+    buy_raw = (df[score_col] >= buy_thresh)
+    sell_raw = (df[score_col] <= sell_thresh)
+
+    if consecutive_bars > 1:
+        buy_raw = buy_raw.rolling(consecutive_bars, min_periods=consecutive_bars).min().fillna(0).astype(bool)
+        sell_raw = sell_raw.rolling(consecutive_bars, min_periods=consecutive_bars).min().fillna(0).astype(bool)
+
+    df[buy_signal_column] = buy_raw
+    df[sell_signal_column] = sell_raw
 
     return df, [buy_signal_column, sell_signal_column]
 

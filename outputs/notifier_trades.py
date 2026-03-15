@@ -102,6 +102,7 @@ async def generate_trader_transaction(df, model: dict, config: dict):
             balance_after = balance_before * (1.0 + leveraged_pnl_pct / 100.0 - fee_margin_pct / 100.0)
             balance_after = max(0.01, balance_after)  # avoid zero
             save_balance(balance_after, starting_balance)
+            _update_daily_after_close(model, balance_after)
             fee_usd = balance_before * (fee_margin_pct / 100.0)
             total_return_pct = 100.0 * (balance_after - starting_balance) / starting_balance if starting_balance else 0.0
 
@@ -142,6 +143,10 @@ async def generate_trader_transaction(df, model: dict, config: dict):
 
     # --- 2) No position: open on BUY/SELL signal with TP/SL ---
     if signal_side not in ("BUY", "SELL"):
+        return None
+
+    if _is_drawdown_paused(model):
+        log.debug("Skipping open: daily drawdown limit reached (paused).")
         return None
 
     atr_col = tp_sl_cfg.get("atr_column")
@@ -439,6 +444,62 @@ def get_balance_path():
     return Path(App.config["data_folder"]) / App.config["symbol"] / "balance.json"
 
 
+def get_daily_state_path():
+    return Path(App.config["data_folder"]) / App.config["symbol"] / "daily_state.json"
+
+
+def load_daily_state():
+    path = get_daily_state_path()
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_daily_state(data: dict):
+    path = get_daily_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=0)
+
+
+def _is_drawdown_paused(model: dict) -> bool:
+    """Return True if daily drawdown limit hit and we should not open new trades. Resets state for new day."""
+    limit_pct = model.get("daily_drawdown_limit_pct")
+    if limit_pct is None or float(limit_pct) <= 0:
+        return False
+    limit_pct = float(limit_pct)
+    today = datetime.now().strftime("%Y-%m-%d")
+    state = load_daily_state()
+    balance_now, starting_balance = load_balance(model)
+    if not state or state.get("date") != today:
+        state = {"date": today, "daily_start_balance": balance_now, "daily_pnl_pct": 0.0, "paused": False}
+        save_daily_state(state)
+    if state.get("paused"):
+        return True
+    return False
+
+
+def _update_daily_after_close(model: dict, balance_after: float):
+    """Update daily state after a close; set paused if daily drawdown limit exceeded."""
+    limit_pct = model.get("daily_drawdown_limit_pct")
+    if limit_pct is None or float(limit_pct) <= 0:
+        return
+    limit_pct = float(limit_pct)
+    state = load_daily_state()
+    if not state:
+        return
+    daily_start = state.get("daily_start_balance") or balance_after
+    state["daily_pnl_pct"] = 100.0 * (balance_after - daily_start) / daily_start if daily_start else 0.0
+    if state["daily_pnl_pct"] <= -limit_pct:
+        state["paused"] = True
+        log.warning("Daily drawdown limit (%.1f%%) hit. Pausing new trades until next day.", limit_pct)
+    save_daily_state(state)
+
+
 def load_balance(model: dict):
     """Current margin balance. If no file, init from config starting_balance."""
     path = get_balance_path()
@@ -475,6 +536,10 @@ def reset_trade_state_on_startup(config: dict):
         clear_position()
         start = float(model.get("starting_balance", 10.0))
         save_balance(start, start)
+        # Reset daily drawdown state so paused flag does not persist across restarts
+        daily_path = get_daily_state_path()
+        if daily_path.is_file():
+            daily_path.unlink()
         # Clear transactions so session stats (wins/losses) start from zero
         tx_path = get_transaction_path()
         tx_path.parent.mkdir(parents=True, exist_ok=True)
