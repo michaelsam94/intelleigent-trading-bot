@@ -117,6 +117,20 @@ def main(config_file):
 
     months_in_simulation = (df[time_column].iloc[-1] - df[time_column].iloc[0]) / timedelta(days=365/12)
 
+    # Optional: fees/leverage/balance (same as realtime trader_simulation) for backtest
+    fee_bps_per_side = simulate_config.get("fee_bps_per_side")
+    leverage = simulate_config.get("leverage")
+    starting_balance = simulate_config.get("starting_balance")
+    if fee_bps_per_side is None or leverage is None:
+        trader_out = next((o for o in config.get("output_sets", []) if o.get("generator") == "trader_simulation"), None)
+        if trader_out and isinstance(trader_out.get("config"), dict):
+            fee_bps_per_side = fee_bps_per_side if fee_bps_per_side is not None else trader_out["config"].get("fee_bps_per_side")
+            leverage = leverage if leverage is not None else trader_out["config"].get("leverage")
+            starting_balance = starting_balance if starting_balance is not None else trader_out["config"].get("starting_balance")
+    fee_bps_per_side = float(fee_bps_per_side) if fee_bps_per_side is not None else 0
+    leverage = float(leverage) if leverage is not None else 1.0
+    starting_balance = float(starting_balance) if starting_balance is not None else None
+
     #
     # Find the generator, the parameters of which will be varied
     #
@@ -156,11 +170,15 @@ def main(config_file):
         buy_signal_column = signal_generator["config"]["names"][0]
         sell_signal_column = signal_generator["config"]["names"][1]
 
-        # Perform backtesting
+        # Perform backtesting (with optional fees/leverage/balance from simulate_model or trader_simulation)
         performance, long_performance, short_performance = simulated_trade_performance(
             df,
             buy_signal_column, sell_signal_column,
-            'close'
+            'close',
+            fee_bps_per_side=fee_bps_per_side,
+            leverage=leverage,
+            starting_balance=starting_balance,
+            direction=direction,
         )
 
         if direction == "long":
