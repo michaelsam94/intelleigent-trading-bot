@@ -1,8 +1,10 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 
 from sklearn.preprocessing import StandardScaler
-
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 
 
@@ -71,7 +73,9 @@ def train_lc(df_X, df_y, model_config: dict):
     #
     # Train
     #
-    model.fit(X_train, y_train)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=ConvergenceWarning, module="sklearn")
+        model.fit(X_train, y_train)
 
     return (model, scaler)
 
