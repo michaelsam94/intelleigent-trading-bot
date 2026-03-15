@@ -10,6 +10,7 @@
     "description": "ETHUSDC 1min realtime, predict next 15 min",
     "freq": "1min",
     "use_websocket": true,
+    "binance_futures": true,
 
     "label_horizon": 15,
     "features_horizon": 240,
@@ -19,7 +20,7 @@
 
     "download_start_days": 60,
     "data_sources": [
-        {"folder": "ETHUSDC", "file": "klines", "column_prefix": ""}
+        {"folder": "ETHUSDC", "file": "futures", "column_prefix": ""}
     ],
 
     "feature_sets": [

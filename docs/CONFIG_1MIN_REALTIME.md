@@ -33,6 +33,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 |-------|------|-------------|
 | `freq` | string | Pandas frequency: `"1min"` for 1-minute candles. |
 | `use_websocket` | boolean | `true` = realtime mode: Binance WebSocket kline stream, no cron. `false` = scheduled mode. |
+| `binance_futures` | boolean | `true` = use Binance USD-M futures (fapi/fstream) for history and WebSocket. `false` = spot. When `true`, set `data_sources[].file` to `"futures"` so download writes and merge reads `futures.csv`. |
 
 ---
 
@@ -53,7 +54,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `download_start_days` | number | When no klines file exists, first download starts this many days before now. Default `60`. Avoids a multi-hour full-history download. |
-| `data_sources` | array | Each item: `folder` (symbol folder), `file` (base filename), `column_prefix` (optional). |
+| `data_sources` | array | Each item: `folder` (symbol folder), `file` (base filename: `"klines"` for spot, `"futures"` when `binance_futures` true), `column_prefix` (optional). |
 
 ---
 

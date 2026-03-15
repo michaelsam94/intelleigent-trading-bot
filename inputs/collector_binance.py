@@ -52,6 +52,10 @@ def init_client(parameters, client_args):
     global client, append_overlap_records
     append_overlap_records = parameters.get("append_overlap_records", 5)
     client = Client(**client_args)
+    if parameters.get("binance_futures", False):
+        client.API_URL = "https://fapi.binance.com/fapi"
+        client.PRIVATE_API_VERSION = "v1"
+        client.PUBLIC_API_VERSION = "v1"
 
 def get_client():
     return client
@@ -265,7 +269,7 @@ def download_klines(config, data_sources):
     # Create binance client to be used for data retrieval
     client = Client(**client_args)
 
-    futures = False
+    futures = config.get("binance_futures", False)
     if futures:
         client.API_URL = "https://fapi.binance.com/fapi"
         client.PRIVATE_API_VERSION = "v1"

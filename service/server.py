@@ -226,8 +226,10 @@ def start_server(config_file):
     if venue == Venue.BINANCE:
         # Prepare binance-specific parameters
         client_params = {}
-        if App.config["append_overlap_records"]:
+        if App.config.get("append_overlap_records"):
             client_params["append_overlap_records"] = App.config["append_overlap_records"]
+        if App.config.get("binance_futures") is not None:
+            client_params["binance_futures"] = App.config["binance_futures"]
         # Prepare binance-specific client arguments
         client_args = dict(
             api_key = App.config.get("api_key"),
@@ -305,8 +307,9 @@ def start_server(config_file):
         log.info("Realtime mode: Binance WebSocket kline stream (no fixed schedule).")
         print("Realtime mode: Binance WebSocket kline stream.", flush=True)
         from inputs.collector_binance_ws import run_klines_websocket
+        use_futures = App.config.get("binance_futures", False)
         def _start_ws():
-            App.ws_task = App.loop.create_task(run_klines_websocket(symbol, freq, process_ws_kline))
+            App.ws_task = App.loop.create_task(run_klines_websocket(symbol, freq, process_ws_kline, futures=use_futures))
         App.loop.call_soon(_start_ws)
         App.sched = None
     else:
@@ -355,7 +358,7 @@ def start_server(config_file):
                 pass
         App.loop.close()
         log.info(f"Event loop closed.")
-        if venue == venue.BINANCE:
+        if venue == Venue.BINANCE:
             from inputs.collector_binance import close_client
             close_client()
         if venue == Venue.MT5:

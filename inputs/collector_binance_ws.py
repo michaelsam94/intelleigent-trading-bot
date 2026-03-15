@@ -36,21 +36,26 @@ async def run_klines_websocket(
     symbol: str,
     pandas_freq: str,
     on_kline_close: Callable[[dict], Awaitable[None]],
+    futures: bool = False,
 ) -> None:
     """
     Connect to Binance kline WebSocket and call on_kline_close(symbol -> df) when a kline closes.
     Runs until the connection is closed or cancelled.
+    futures: if True, use USDT-M/USDC-M futures stream (fstream.binance.com).
     """
     stream_symbol = symbol.lower()
     binance_interval = binance_freq_from_pandas(pandas_freq)
-    url = f"wss://stream.binance.com:9443/ws/{stream_symbol}@kline_{binance_interval}"
+    if futures:
+        url = f"wss://fstream.binance.com/ws/{stream_symbol}@kline_{binance_interval}"
+    else:
+        url = f"wss://stream.binance.com:9443/ws/{stream_symbol}@kline_{binance_interval}"
 
     try:
         import websockets
     except ImportError:
         raise RuntimeError("Install websockets: pip install websockets")
 
-    log.info("WebSocket connecting to %s (realtime klines)", url)
+    log.info("WebSocket connecting to %s (realtime klines, %s)", url, "futures" if futures else "spot")
 
     async for ws in websockets.connect(
         url,
