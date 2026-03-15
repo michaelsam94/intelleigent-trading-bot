@@ -332,19 +332,23 @@ def compute_scores(y_true, y_hat):
     y_true = y_true.astype(int)
     y_hat_class = np.where(y_hat.values > 0.5, 1, 0)
 
-    try:
-        auc = metrics.roc_auc_score(y_true, y_hat.fillna(value=0))
-    except ValueError:
-        auc = 0.0  # Only one class is present (if dataset is too small, e.g,. when debugging) or Nulls in predictions
+    n_classes = len(np.unique(y_true))
+    if n_classes < 2:
+        auc = 0.0
+        ap = 0.0
+    else:
+        try:
+            auc = metrics.roc_auc_score(y_true, y_hat.fillna(value=0))
+        except ValueError:
+            auc = 0.0
+        try:
+            ap = metrics.average_precision_score(y_true, y_hat.fillna(value=0))
+        except ValueError:
+            ap = 0.0
 
-    try:
-        ap = metrics.average_precision_score(y_true, y_hat.fillna(value=0))
-    except ValueError:
-        ap = 0.0  # Only one class is present (if dataset is too small, e.g,. when debugging) or Nulls in predictions
-
-    f1 = metrics.f1_score(y_true, y_hat_class)
-    precision = metrics.precision_score(y_true, y_hat_class)
-    recall = metrics.recall_score(y_true, y_hat_class)
+    f1 = metrics.f1_score(y_true, y_hat_class, zero_division=0)
+    precision = metrics.precision_score(y_true, y_hat_class, zero_division=0)
+    recall = metrics.recall_score(y_true, y_hat_class, zero_division=0)
 
     scores = dict(auc=auc, ap=ap, f1=f1, precision=precision, recall=recall,)
 
@@ -377,19 +381,23 @@ def compute_scores_regression(y_true, y_hat):
     y_true_class = np.where(y_true.values > 0.0, +1, -1)
     y_hat_class = np.where(y_hat.values > 0.0, +1, -1)
 
-    try:
-        auc = metrics.roc_auc_score(y_true_class, y_hat_class)
-    except ValueError:
-        auc = 0.0  # Only one class is present (if dataset is too small, e.g,. when debugging) or Nulls in predictions
+    n_classes = len(np.unique(y_true_class))
+    if n_classes < 2:
+        auc = 0.0
+        ap = 0.0
+    else:
+        try:
+            auc = metrics.roc_auc_score(y_true_class, y_hat_class)
+        except ValueError:
+            auc = 0.0
+        try:
+            ap = metrics.average_precision_score(y_true_class, y_hat_class)
+        except ValueError:
+            ap = 0.0
 
-    try:
-        ap = metrics.average_precision_score(y_true_class, y_hat_class)
-    except ValueError:
-        ap = 0.0  # Only one class is present (if dataset is too small, e.g,. when debugging) or Nulls in predictions
-
-    f1 = metrics.f1_score(y_true_class, y_hat_class)
-    precision = metrics.precision_score(y_true_class, y_hat_class)
-    recall = metrics.recall_score(y_true_class, y_hat_class)
+    f1 = metrics.f1_score(y_true_class, y_hat_class, zero_division=0)
+    precision = metrics.precision_score(y_true_class, y_hat_class, zero_division=0)
+    recall = metrics.recall_score(y_true_class, y_hat_class, zero_division=0)
 
     scores = dict(
         mae=mae, mape=mape, r2=r2,
