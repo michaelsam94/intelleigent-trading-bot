@@ -55,7 +55,7 @@ def train_gb(df_X, df_y, model_config: dict):
         #"n_estimators": 10000,
 
         #"min_split_gain": params['min_split_gain'],
-        "min_data_in_leaf": int(0.01*len(df_X)),  # Best: ~0.02 * len() - 2% of size
+        "min_data_in_leaf": min(int(0.01 * len(df_X)), 150),  # Cap so trees can keep splitting (avoids "no more leaves" early stop)
         #'subsample': 0.8,
         #'colsample_bytree': 0.8,
         'num_leaves': 32,  # or (2 * 2**max_depth)
