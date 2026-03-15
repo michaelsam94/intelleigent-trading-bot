@@ -98,6 +98,7 @@
     "simulate_model": {
         "data_start": 0,
         "data_end": null,
+        "data_days": null,
         "direction": "long",
         "topn_to_store": 10,
         "signal_generator": "threshold_rule",

@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import timedelta
 import click
 from tqdm import tqdm
 
@@ -34,7 +35,8 @@ responsible for generation of trade signals. It then measures performance.
 
 @click.command()
 @click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
-def main(config_file):
+@click.option('--days', '-d', type=int, default=None, help='Use only the last N days of data for backtest (overrides simulate_model.data_days)')
+def main(config_file, days):
     load_config(config_file)
     config = App.config
 
@@ -74,6 +76,7 @@ def main(config_file):
 
     data_start = simulate_config.get("data_start", None)
     data_end = simulate_config.get("data_end", None)
+    data_days = days if days is not None else simulate_config.get("data_days", None)
 
     if data_start:
         if isinstance(data_start, str):
@@ -86,6 +89,11 @@ def main(config_file):
             df = df[ df[time_column] < data_end ]
         elif isinstance(data_end, int):
             df = df.iloc[:-data_end]
+
+    if data_days is not None and data_days > 0:
+        # Keep only the last N days (by timestamp)
+        cutoff = df[time_column].max() - timedelta(days=int(data_days))
+        df = df[df[time_column] >= cutoff].reset_index(drop=True)
 
     df = df.reset_index(drop=True)
 
