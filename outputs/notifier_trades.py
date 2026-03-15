@@ -458,3 +458,27 @@ def save_balance(balance: float, starting_balance: float):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump({"balance": balance, "starting_balance": starting_balance}, f)
+
+
+def reset_trade_state_on_startup(config: dict):
+    """
+    On server restart: clear position, reset balance to starting_balance, and clear
+    transaction history (so session stats show 0 wins / 0 losses) when
+    trader_simulation has reset_balance_on_restart true (default).
+    """
+    for out in config.get("output_sets", []):
+        if out.get("generator") != "trader_simulation":
+            continue
+        model = out.get("config") or {}
+        if model.get("reset_balance_on_restart", True) is False:
+            continue
+        clear_position()
+        start = float(model.get("starting_balance", 10.0))
+        save_balance(start, start)
+        # Clear transactions so session stats (wins/losses) start from zero
+        tx_path = get_transaction_path()
+        tx_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tx_path, "w") as f:
+            f.write("2020-01-01 00:00:00+00:00,0.0,0.0,SELL\n")
+        log.info("Trade state reset on restart: position cleared, balance=%s, transactions cleared", start)
+        return

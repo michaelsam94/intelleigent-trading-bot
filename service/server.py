@@ -260,6 +260,7 @@ def start_server(config_file):
 
     # Load latest transaction and (simulated) trade state
     App.transaction = load_last_transaction()
+    reset_trade_state_on_startup(App.config)
 
     #App.loop = asyncio.get_event_loop()  # In Python 3.12: DeprecationWarning: There is no current event loop
     App.loop = asyncio.new_event_loop()
