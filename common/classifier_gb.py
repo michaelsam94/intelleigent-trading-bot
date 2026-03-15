@@ -35,6 +35,9 @@ def train_gb(df_X, df_y, model_config: dict):
 
     y_train = df_y.values
 
+    train_conf = model_config.get("train", {})
+    early_stopping_rounds = train_conf.get("early_stopping_rounds")
+
     # Optional validation split for early stopping (last 10% of rows, temporal)
     valid_sets = None
     if early_stopping_rounds is not None and early_stopping_rounds > 0 and len(X_train) > 100:
@@ -48,15 +51,10 @@ def train_gb(df_X, df_y, model_config: dict):
     #
     # Create model
     #
-    train_conf = model_config.get("train", {})
-
     objective = train_conf.get("objective")
-
     max_depth = train_conf.get("max_depth")
     learning_rate = train_conf.get("learning_rate")
     num_boost_round = train_conf.get("num_boost_round")
-    early_stopping_rounds = train_conf.get("early_stopping_rounds")
-
     lambda_l1 = train_conf.get("lambda_l1")
     lambda_l2 = train_conf.get("lambda_l2")
 
