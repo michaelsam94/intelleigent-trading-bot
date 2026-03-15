@@ -84,11 +84,29 @@ def predict_lc(models: tuple, df_X_test, model_config: dict):
     Use the model(s) to make predictions for the test data.
     The first model is a prediction model and the second model (optional) is a scaler.
     """
-    #
-    # Scale
-    #
     scaler = models[1]
     is_scale = scaler is not None
+    model = models[0]
+
+    # Align columns to what the scaler/model were trained on (e.g. after config added features, saved model has fewer)
+    n_expected = None
+    if is_scale and hasattr(scaler, "mean_") and scaler.mean_ is not None:
+        n_expected = scaler.mean_.shape[0]
+    elif hasattr(model, "coef_") and model.coef_ is not None:
+        n_expected = model.coef_.shape[1]
+    if n_expected is not None and df_X_test.shape[1] != n_expected:
+        if is_scale and hasattr(scaler, "feature_names_in_") and scaler.feature_names_in_ is not None:
+            want = list(scaler.feature_names_in_)
+            missing = [c for c in want if c not in df_X_test.columns]
+            if missing:
+                raise ValueError(
+                    f"Model was trained with {n_expected} features (e.g. {want[:3]}...). "
+                    f"Current config has {df_X_test.shape[1]} features. Missing in data: {missing[:5]}. Retrain with current config."
+                )
+            df_X_test = df_X_test[want].copy()
+        else:
+            # Fallback: take first n_expected columns (assumes new features were appended to config)
+            df_X_test = df_X_test.iloc[:, :n_expected].copy()
 
     input_index = df_X_test.index
     X_orig = df_X_test.copy()

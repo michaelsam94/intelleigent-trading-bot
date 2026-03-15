@@ -104,11 +104,21 @@ def predict_gb(models: tuple, df_X_test, model_config: dict):
     Use the model(s) to make predictions for the test data.
     The first model is a prediction model and the second model (optional) is a scaler.
     """
-    #
-    # Scale
-    #
     scaler = models[1]
     is_scale = scaler is not None
+
+    # Align columns to what the scaler/model were trained on (e.g. after config added features)
+    if is_scale and hasattr(scaler, "mean_") and scaler.mean_ is not None:
+        n_expected = scaler.mean_.shape[0]
+        if df_X_test.shape[1] != n_expected:
+            if hasattr(scaler, "feature_names_in_") and scaler.feature_names_in_ is not None:
+                want = list(scaler.feature_names_in_)
+                if all(c in df_X_test.columns for c in want):
+                    df_X_test = df_X_test[want].copy()
+                else:
+                    df_X_test = df_X_test.iloc[:, :n_expected].copy()
+            else:
+                df_X_test = df_X_test.iloc[:, :n_expected].copy()
 
     input_index = df_X_test.index
     if is_scale:
