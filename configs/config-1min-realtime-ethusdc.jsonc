@@ -16,7 +16,7 @@
     "features_horizon": 240,
     "train_length": 60000,
     "predict_length": 288,
-    "append_overlap_records": 5,
+    "append_overlap_records": 60,
 
     "download_start_days": 60,
     "data_sources": [
@@ -24,7 +24,7 @@
     ],
 
     "feature_sets": [
-        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["SMA", "EMA"], "windows": [3, 5, 10, 15, 30, 60, 120]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["SMA", "EMA"], "windows": [3, 5, 10, 15, 30, 60]}},
         {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["LINEARREG_SLOPE"], "windows": [5, 10, 15, 30, 60]}},
         {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["RSI", "ROC", "MOM"], "windows": [5, 10, 14, 20]}},
         {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["STDDEV"], "windows": [5, 10, 20, 60]}},
@@ -34,14 +34,14 @@
     ],
 
     "label_sets": [
-        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "high", "thresholds": [0.5], "tolerance": 0.2, "horizon": 15, "names": ["high_20"]}},
-        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "low", "thresholds": [0.5], "tolerance": 0.2, "horizon": 15, "names": ["low_20"]}}
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "high", "thresholds": [0.3, 0.5], "tolerance": 0.2, "horizon": 15, "names": ["high_20_03", "high_20_05"]}},
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "low", "thresholds": [0.3, 0.5], "tolerance": 0.2, "horizon": 15, "names": ["low_20_03", "low_20_05"]}}
     ],
 
     "train_feature_sets": [{"generator": "train_features", "config": {}}],
     "train_features": [
-        "close_SMA_3", "close_SMA_5", "close_SMA_10", "close_SMA_15", "close_SMA_30", "close_SMA_60", "close_SMA_120",
-        "close_EMA_3", "close_EMA_5", "close_EMA_10", "close_EMA_15", "close_EMA_30", "close_EMA_60", "close_EMA_120",
+        "close_SMA_3", "close_SMA_5", "close_SMA_10", "close_SMA_15", "close_SMA_30", "close_SMA_60",
+        "close_EMA_3", "close_EMA_5", "close_EMA_10", "close_EMA_15", "close_EMA_30", "close_EMA_60",
         "close_LINEARREG_SLOPE_5", "close_LINEARREG_SLOPE_10", "close_LINEARREG_SLOPE_15", "close_LINEARREG_SLOPE_30", "close_LINEARREG_SLOPE_60",
         "close_RSI_5", "close_RSI_10", "close_RSI_14", "close_RSI_20",
         "close_ROC_5", "close_ROC_10", "close_ROC_14", "close_ROC_20",
@@ -51,14 +51,14 @@
         "close_volume_OBV",
         "high_low_close_volume_MFI_10", "high_low_close_volume_MFI_20"
     ],
-    "labels": ["high_20", "low_20"],
+    "labels": ["high_20_03", "high_20_05", "low_20_03", "low_20_05"],
     "algorithms": [
-        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": true}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "sag", "max_iter": 100}},
-        {"name": "gb", "algo": "gb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary", "max_depth": 6, "learning_rate": 0.05, "num_boost_round": 200, "lambda_l1": 0.1, "lambda_l2": 0.1}}
+        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": true}, "train": {"penalty": "l2", "C": 1.0, "class_weight": null, "solver": "saga", "max_iter": 500}},
+        {"name": "gb", "algo": "gb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary", "max_depth": 6, "learning_rate": 0.02, "num_boost_round": 500, "lambda_l1": 0.1, "lambda_l2": 0.1}}
     ],
 
     "signal_sets": [
-        {"generator": "combine", "config": {"columns": ["high_20_lc", "low_20_lc"], "names": "trade_score", "combine": "difference", "coefficient": 1.0, "constant": 0.0}},
+        {"generator": "combine", "config": {"columns": ["high_20_05_lc", "low_20_05_lc"], "names": "trade_score", "combine": "difference", "coefficient": 1.0, "constant": 0.0}},
         {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "parameters": {"buy_signal_threshold": 0.015, "sell_signal_threshold": -0.015}}}
     ],
 
@@ -104,13 +104,13 @@
         "direction": "long",
         "topn_to_store": 10,
         "signal_generator": "threshold_rule",
-        "buy_sell_equal": true,
+        "buy_sell_equal": false,
         "fee_bps_per_side": 4,
         "leverage": 20,
         "starting_balance": 10,
         "grid": {
             "buy_signal_threshold": [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05],
-            "sell_signal_threshold": [null]
+            "sell_signal_threshold": [-0.01, -0.015, -0.02, -0.025, -0.03, -0.04, -0.05]
         }
     }
 }
