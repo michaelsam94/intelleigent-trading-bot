@@ -738,6 +738,9 @@ def generate_features_resampled(df: pd.DataFrame, full_config: dict, config: dic
     if time_col not in df.columns:
         raise ValueError(f"Resampled features need time column '{time_col}' in dataframe")
     rule = config.get("rule", "5T")
+    # Pandas 2.2+: 'T' deprecated for resample, use 'min'
+    if isinstance(rule, str) and rule.endswith("T") and rule[:-1].isdigit():
+        rule = rule[:-1] + "min"
     prefix = config.get("prefix", "5m")
     talib_cfg = config.get("talib", {"columns": ["close"], "functions": ["RSI", "LINEARREG_SLOPE"], "windows": [14, 10]})
     time_idx = pd.DatetimeIndex(pd.to_datetime(df[time_col]))
