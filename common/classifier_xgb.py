@@ -61,15 +61,14 @@ def train_xgb(df_X, df_y, model_config: dict):
     }
     if scale_pos_weight is not None:
         xgb_params["scale_pos_weight"] = scale_pos_weight
+    # XGBoost 2.0+: early_stopping_rounds must be on the constructor, not fit()
+    if early_stopping_rounds and early_stopping_rounds > 0:
+        xgb_params["early_stopping_rounds"] = early_stopping_rounds
 
-    fit_kw = dict(
-        X=X_train,
-        y=y_train,
-    )
+    fit_kw = dict(X=X_train, y=y_train)
     if valid_set is not None:
         fit_kw["eval_set"] = [valid_set]
         fit_kw["verbose"] = False
-        fit_kw["early_stopping_rounds"] = early_stopping_rounds
 
     model = xgb.XGBClassifier(**xgb_params)
     model.fit(**fit_kw)
