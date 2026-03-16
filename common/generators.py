@@ -1,7 +1,10 @@
 from typing import Tuple
 import asyncio
+import logging
 
 import numpy as np
+
+log = logging.getLogger("generators")
 import pandas as pd
 import pandas.api.types as ptypes
 
@@ -134,8 +137,10 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
             else:
                 score_column_name = label + label_algo_separator + algo_name
 
-            # It is an entry from loaded model dict
-            model_pair = model_store.get_model_pair(score_column_name)  # Trained model from model registry
+            model_pair = model_store.get_model_pair(score_column_name)
+            if model_pair is None:
+                log.warning("Model '%s' not loaded (missing or failed). Skip predict.", score_column_name)
+                continue
 
             print(f"Predict '{score_column_name}'. Algorithm {algo_name}. Label: {label}. Train length {len(train_df)}. Train columns {len(train_df.columns)}")
 

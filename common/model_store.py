@@ -129,7 +129,8 @@ class ModelStore:
         return self.model_pairs
 
     def get_model_pair(self, column_name: str):
-        return self.model_pairs[column_name]
+        """Return (model, scaler) for the given score column, or None if not loaded (e.g. missing file)."""
+        return self.model_pairs.get(column_name)
 
     def put_model_pair(self, column_name: str, model_pair: tuple):
         self.model_pairs[column_name] = model_pair
