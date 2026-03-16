@@ -122,6 +122,8 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `trader_simulation.config.leverage` | number | Leverage (e.g. `20`). Margin P&L % = price P&L % × leverage. |
 | `trader_simulation.config.fee_bps_per_side` | number | Fee in basis points per side (e.g. `4` = 0.04%). Applied open + close. |
 | `trader_simulation.config.daily_drawdown_limit_pct` | number | Optional. If set (e.g. `5`), stop opening new trades for the rest of the day once daily P&amp;L (from start of day) reaches this loss %. Resets at midnight. |
+| `trader_simulation.config.min_bars_between_trades` | number | Optional. Minimum bars (e.g. minutes for 1m) between closing a position and opening the next. Reduces rapid re-entry after SL (e.g. `5`). |
+| `trader_simulation.config.short_trend_filter_column` | string | Optional. Feature column (e.g. `"close_LINEARREG_SLOPE_60"`). If set, SHORT is not opened when this value is &gt; 0 (blocks shorts in uptrend). |
 | `trader_simulation.config.tp_sl` | object | **TP/SL**: no new signal until position closes at TP or SL. |
 | `tp_sl.atr_column` | string | Feature column for ATR (e.g. `"high_low_close_ATR_14"`). |
 | `tp_sl.tp_atr_mult` | number | Take-profit distance = ATR × this (e.g. `2.0`). |

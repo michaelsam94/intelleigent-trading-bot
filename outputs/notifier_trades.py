@@ -132,6 +132,7 @@ async def generate_trader_transaction(df, model: dict, config: dict):
                 f.write(t_line)
 
             clear_position()
+            _save_last_close_time(close_time)
             App.transaction = dict(
                 timestamp=str(close_time), price=exit_price, profit=profit, status=status_close
             )
@@ -167,6 +168,34 @@ async def generate_trader_transaction(df, model: dict, config: dict):
     if _is_drawdown_paused(model):
         log.warning("Skipping open: daily drawdown limit reached (paused). No new trades until next day or increase daily_drawdown_limit_pct.")
         return None
+
+    min_bars = model.get("min_bars_between_trades")
+    if min_bars is not None and int(min_bars) > 0:
+        last_close = _load_last_close_time()
+        if last_close is not None:
+            try:
+                if hasattr(close_time, "timestamp"):
+                    now_ts = close_time.timestamp()
+                else:
+                    now_ts = pd.Timestamp(close_time).timestamp()
+                last_ts = pd.Timestamp(last_close).timestamp()
+                bars_since = (now_ts - last_ts) / 60.0
+                if bars_since < int(min_bars):
+                    log.debug("Skipping open: cooldown (%.0f bars since last close, need %s).", bars_since, min_bars)
+                    return None
+            except Exception:
+                pass
+
+    if signal_side == "SELL":
+        trend_col = model.get("short_trend_filter_column")
+        if trend_col and trend_col in row.index:
+            try:
+                val = float(row[trend_col])
+                if val > 0:
+                    log.debug("Skipping SHORT: trend filter %s=%.4f > 0 (uptrend).", trend_col, val)
+                    return None
+            except (TypeError, ValueError):
+                pass
 
     atr_col = tp_sl_cfg.get("atr_column")
     tp_mult = float(tp_sl_cfg.get("tp_atr_mult", 2.0))
@@ -457,6 +486,30 @@ def clear_position():
     path = get_position_path()
     if path.is_file():
         path.unlink()
+
+
+def get_last_close_path():
+    return Path(App.config["data_folder"]) / App.config["symbol"] / "last_close.json"
+
+
+def _save_last_close_time(close_time) -> None:
+    """Record time of last position close for min_bars_between_trades cooldown."""
+    path = get_last_close_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"last_close_time": str(close_time)}, f)
+
+
+def _load_last_close_time():
+    """Return last position close time string, or None."""
+    path = get_last_close_path()
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f).get("last_close_time")
+    except Exception:
+        return None
 
 
 def get_balance_path():
