@@ -34,9 +34,10 @@ def main(config_file):
     is_train = config.get("train")
     if is_train:
         window_size = config.get("train_length")
-        print(f"WARNING: Train mode is specified although this script is intended for prediction and will not train models.")
+        print(f"Train mode: using train_length ({window_size} bars) for full model training.")
     else:
         window_size = config.get("predict_length")
+        print(f"WARNING: Config has \"train\": false. Using predict_length ({window_size} bars). Models will be weak. Set \"train\": true for real training.")
     features_horizon = config.get("features_horizon")
     if window_size:
         window_size += features_horizon

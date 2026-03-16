@@ -183,6 +183,8 @@ class ModelStore:
                 model_pair = self._load_label_algo_model_pair_from_file(score_column_name)
             except Exception:
                 log.error(f"ERROR: Cannot load model {score_column_name} from path {self.model_path}. Skip.")
+                if alg.get("algo") == "meta":
+                    models[score_column_name] = None
                 continue
             models[score_column_name] = model_pair
         return models

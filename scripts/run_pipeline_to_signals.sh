@@ -5,7 +5,9 @@
 #   ./scripts/run_pipeline_to_signals.sh <config.jsonc>      # run one config
 #   ./scripts/run_pipeline_to_signals.sh <config1> <config2> # run multiple configs
 #
-# For training you need "train": true in the config. Set it back to false for the server.
+# Required: set "train": true in the config before running (step 5 trains lc, gb, xgb, meta).
+# After pipeline completes, set "train": false again for the server so it doesn't retrain on every run.
+# If you skip this, XGB and trade_score_meta models will be missing and the server will log "Cannot load model... Skip."
 
 set -e
 
@@ -40,7 +42,16 @@ print(json.loads(s).get('data_folder', './data'))
   echo "4/7 Labels..."
   python -m scripts.labels -c "$CONFIG"
 
-  echo "5/7 Train (ensure \"train\": true in config for this step)..."
+  echo "5/7 Train..."
+  TRAIN_MODE=$(python -c "
+import re, json, sys
+with open(sys.argv[1]) as f: s = re.sub(r'//.*', '', f.read())
+print(json.loads(s).get('train', False))
+" "$CONFIG")
+  if [ "$TRAIN_MODE" != "True" ]; then
+    echo "ERROR: Config has \"train\": false. Set \"train\": true in $CONFIG so step 5 trains all models (lc, gb, xgb, meta). Then set back to false for the server."
+    exit 1
+  fi
   python -m scripts.train -c "$CONFIG"
 
   echo "6/7 Predict..."
