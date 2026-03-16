@@ -68,9 +68,10 @@ async def generate_trader_transaction(df, model: dict, config: dict):
         entry_time = position.get("entry_time")
         atr_at_entry = position.get("atr_at_entry") or 0.0
 
-        # Trailing stop: lock profits as price moves in our favor
+        # Trailing stop: lock profits as price moves in our favor (optional, enabled via config)
+        trailing_enabled = tp_sl_cfg.get("trailing_stop_enabled", False)
         trailing_mult = tp_sl_cfg.get("trailing_atr_mult")
-        if trailing_mult is not None and atr_at_entry > 0:
+        if trailing_enabled and trailing_mult is not None and atr_at_entry > 0:
             trail_dist = float(trailing_mult) * atr_at_entry
             best = position.get("best_price")
             if side == "LONG":

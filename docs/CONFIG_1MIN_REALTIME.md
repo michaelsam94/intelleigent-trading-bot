@@ -126,7 +126,8 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `tp_sl.atr_column` | string | Feature column for ATR (e.g. `"high_low_close_ATR_14"`). |
 | `tp_sl.tp_atr_mult` | number | Take-profit distance = ATR × this (e.g. `2.0`). |
 | `tp_sl.sl_atr_mult` | number | Stop-loss distance = ATR × this (e.g. `1.5`). |
-| `tp_sl.trailing_atr_mult` | number | Optional. If set, trailing stop locks profits: stop moves to (best price − ATR × this) for LONG, (best price + ATR × this) for SHORT. |
+| `tp_sl.trailing_stop_enabled` | boolean | If `true`, trailing stop is used (requires `trailing_atr_mult`). Default `false`. |
+| `tp_sl.trailing_atr_mult` | number | ATR multiplier for trailing stop distance when `trailing_stop_enabled` is true (e.g. `2.0`). |
 | `tp_sl.tp_pct_fallback` | number | If ATR missing, TP % (e.g. `0.5` = 0.5%). |
 | `tp_sl.sl_pct_fallback` | number | If ATR missing, SL % (e.g. `0.3`). |
 | `score_notification` | boolean | Enable Telegram score notifications. |

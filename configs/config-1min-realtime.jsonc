@@ -95,6 +95,7 @@
                 "atr_column": "high_low_close_ATR_14",
                 "tp_atr_mult": 4.0,
                 "sl_atr_mult": 1.5,
+                "trailing_stop_enabled": false,
                 "trailing_atr_mult": 2.0,
                 "tp_pct_fallback": 0.15,
                 "sl_pct_fallback": 0.1
