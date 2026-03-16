@@ -229,10 +229,12 @@ def train_feature_set(df, fs, config) -> dict:
                 from common.classifier_gb import train_gb
                 model_pair = train_gb(df_X, df_y, model_config)
                 models[score_column_name] = model_pair
+                print(f"Done '{score_column_name}'.")
             elif algo_type == "xgb":
                 from common.classifier_xgb import train_xgb
                 model_pair = train_xgb(df_X, df_y, model_config)
                 models[score_column_name] = model_pair
+                print(f"Done '{score_column_name}'.")
             elif algo_type == "lstm":
                 from common.classifier_lstm import train_lstm
                 model_pair = train_lstm(df_X, df_y, model_config)
@@ -247,10 +249,12 @@ def train_feature_set(df, fs, config) -> dict:
                 from common.classifier_lc import train_lc
                 model_pair = train_lc(df_X, df_y, model_config)
                 models[score_column_name] = model_pair
+                print(f"Done '{score_column_name}'.")
             elif algo_type == "svc":
                 from common.classifier_svc import train_svc
                 model_pair = train_svc(df_X, df_y, model_config)
                 models[score_column_name] = model_pair
+                print(f"Done '{score_column_name}'.")
             else:
                 raise ValueError(f"Unknown algorithm type {algo_type}. Check algorithm list.")
 

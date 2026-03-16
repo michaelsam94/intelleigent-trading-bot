@@ -92,9 +92,11 @@ def train_gb(df_X, df_y, model_config: dict):
         train_set=lgbm.Dataset(X_train, y_train),
         num_boost_round=num_boost_round,
     )
+    callbacks = [lgbm.log_evaluation(period=100)]
     if valid_sets is not None:
         call_kw["valid_sets"] = valid_sets
-        call_kw["callbacks"] = [lgbm.early_stopping(early_stopping_rounds, verbose=False)]
+        callbacks.append(lgbm.early_stopping(early_stopping_rounds, verbose=False))
+    call_kw["callbacks"] = callbacks
     model = lgbm.train(lgbm_params, **call_kw)
 
     return (model, scaler)
