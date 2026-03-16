@@ -96,7 +96,7 @@
             "leverage": 20,
             "fee_bps_per_side": 4,
             "reset_balance_on_restart": true,
-            "daily_drawdown_limit_pct": 5,
+            "daily_drawdown_limit_pct": 90,
             "tp_sl": {
                 "atr_column": "high_low_close_ATR_14",
                 "tp_atr_mult": 4.0,

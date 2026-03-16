@@ -6,6 +6,11 @@ import json
 import numpy as np
 import pandas as pd
 
+try:
+    from numba import njit
+except ImportError:
+    njit = None
+
 from common.utils import *
 from common.gen_features import *
 from common.gen_features_rolling_agg import *
@@ -139,25 +144,29 @@ def _first_location_of_crossing_threshold(df, horizon, threshold, close_column_n
     function can be used to find whether the price will cross the threshold at all
     during the specified horizon.
 
-    The function is somewhat similar to the tsfresh function first_location_of_maximum
-    or minimum. The difference is that this function does not search for maximum but rather
-    first cross of the threshold.
-
     Horizon specifies how many points are considered after this point and without this point.
-
     Threshold is increase or decrease coefficient, say, 50.0 means 50% increase with respect to
     the current close price.
     """
-
+    close = np.asarray(df[close_column_name], dtype=np.float64)
+    price = np.asarray(df[price_column_name], dtype=np.float64)
+    n = len(close)
+    # Use fast numba path when available; otherwise fall back to rolling (slow for large n).
+    if njit is not None and n > 2000:
+        if threshold > 0:
+            out = _first_cross_high_numba(close, price, horizon, threshold)
+        else:
+            out = _first_cross_low_numba(close, price, horizon, threshold)
+        out = pd.Series(out, index=df.index)
+        out = out.replace(-1, np.nan)
+        return out
+    # Fallback: rolling apply (slow for 60k+ rows)
     def fn_high(x):
         if len(x) < 2:
             return np.nan
-        p = x[0, 0]  # Reference price
-        p_threshold = p*(1+(threshold/100.0))  # Cross line
-        idx = np.argmax(x[1:, 1] > p_threshold)  # First index where price crosses the threshold
-
-        # If all False, then index is 0 (first element of constant series) and we are not able to distinguish it from first element being True
-        # If index is 0 and first element False (under threshold) then NaN (not exceeds)
+        p = x[0, 0]
+        p_threshold = p * (1 + (threshold / 100.0))
+        idx = np.argmax(x[1:, 1] > p_threshold)
         if idx == 0 and x[1, 1] <= p_threshold:
             return np.nan
         return idx
@@ -165,33 +174,54 @@ def _first_location_of_crossing_threshold(df, horizon, threshold, close_column_n
     def fn_low(x):
         if len(x) < 2:
             return np.nan
-        p = x[0, 0]  # Reference price
-        p_threshold = p*(1+(threshold/100.0))  # Cross line
-        idx = np.argmax(x[1:, 1] < p_threshold)  # First index where price crosses the threshold
-
-        # If all False, then index is 0 (first element of constant series) and we are not able to distinguish it from first element being True
-        # If index is 0 and first element False (under threshold) then NaN (not exceeds)
+        p = x[0, 0]
+        p_threshold = p * (1 + (threshold / 100.0))
+        idx = np.argmax(x[1:, 1] < p_threshold)
         if idx == 0 and x[1, 1] >= p_threshold:
             return np.nan
         return idx
 
-    # Window df will include the current row as well as horizon of past rows with 0 index starting from the oldest row and last index with the current row
-    rl = df[[close_column_name, price_column_name]].rolling(horizon + 1, min_periods=(horizon // 2), method='table')
-
+    rl = df[[close_column_name, price_column_name]].rolling(
+        horizon + 1, min_periods=(horizon // 2), method="table"
+    )
     if threshold > 0:
-        df_out = rl.apply(fn_high, raw=True, engine='numba')
-    elif threshold < 0:
-        df_out = rl.apply(fn_low, raw=True, engine='numba')
+        df_out = rl.apply(fn_high, raw=True)
     else:
-        raise ValueError(f"Threshold cannot be zero.")
-
-    # Because rolling apply processes past records while we need future records
+        df_out = rl.apply(fn_low, raw=True)
     df_out = df_out.shift(-horizon)
-
-    # For some unknown reason (bug?), rolling apply (with table and numba) returns several columns rather than one column
-    out_column = df_out.iloc[:, 0]
-
+    out_column = df_out.iloc[:, 0] if df_out.ndim > 1 else df_out
     return out_column
+
+
+if njit is not None:
+
+    @njit(cache=True)
+    def _first_cross_high_numba(close, price, horizon, threshold):
+        """First 0-based index where price > close_ref * (1 + threshold/100). Store at out[i+horizon] for start row i. -1 if none."""
+        n = len(close)
+        out = np.full(n, -1, dtype=np.int64)
+        mult = 1.0 + (threshold / 100.0)
+        for i in range(n - horizon):
+            ref = close[i] * mult
+            for j in range(1, horizon + 1):
+                if price[i + j] > ref:
+                    out[i + horizon] = j - 1
+                    break
+        return out
+
+    @njit(cache=True)
+    def _first_cross_low_numba(close, price, horizon, threshold):
+        """First 0-based index where price < close_ref * (1 + threshold/100). Store at out[i+horizon] for start row i. -1 if none."""
+        n = len(close)
+        out = np.full(n, -1, dtype=np.int64)
+        mult = 1.0 + (threshold / 100.0)
+        for i in range(n - horizon):
+            ref = close[i] * mult
+            for j in range(1, horizon + 1):
+                if price[i + j] < ref:
+                    out[i + horizon] = j - 1
+                    break
+        return out
 
 
 def first_cross_labels(df, horizon, thresholds, close_column, price_columns, out_column):

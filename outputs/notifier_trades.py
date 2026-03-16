@@ -165,7 +165,7 @@ async def generate_trader_transaction(df, model: dict, config: dict):
         return None
 
     if _is_drawdown_paused(model):
-        log.debug("Skipping open: daily drawdown limit reached (paused).")
+        log.warning("Skipping open: daily drawdown limit reached (paused). No new trades until next day or increase daily_drawdown_limit_pct.")
         return None
 
     atr_col = tp_sl_cfg.get("atr_column")
