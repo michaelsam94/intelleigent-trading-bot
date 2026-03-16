@@ -172,10 +172,16 @@ class ModelStore:
         """Load all model pairs for all combinations of labels and algorithms and return as a dict."""
         models = {}
         for label_algorithm in itertools.product(labels, algorithms):
-            score_column_name = label_algorithm[0] + label_algo_separator + label_algorithm[1]["name"]
+            label, alg = label_algorithm
+            if alg.get("algo") == "meta":
+                score_column_name = alg.get("params", {}).get("score_column", "trade_score_meta")
+                if score_column_name in models:
+                    continue
+            else:
+                score_column_name = label + label_algo_separator + alg["name"]
             try:
                 model_pair = self._load_label_algo_model_pair_from_file(score_column_name)
-            except Exception as e:
+            except Exception:
                 log.error(f"ERROR: Cannot load model {score_column_name} from path {self.model_path}. Skip.")
                 continue
             models[score_column_name] = model_pair

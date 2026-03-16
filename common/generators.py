@@ -87,6 +87,20 @@ def generate_feature_set(df: pd.DataFrame, fs: dict, config: dict, model_store: 
         f_df, features = generate_smoothen_scores(f_df, gen_config)
     elif generator == "combine":
         f_df, features = generate_combine_scores(f_df, gen_config)
+    elif generator == "meta":
+        from common.classifier_meta import predict_meta
+        base_cols = gen_config.get("columns", [])
+        out_name = gen_config.get("name", "trade_score")
+        if len(base_cols) != 6:
+            raise ValueError(f"Meta generator expects 6 columns (high_lc, high_gb, high_xgb, low_lc, low_gb, low_xgb). Got {len(base_cols)}.")
+        model_pair = model_store.get_model_pair("trade_score_meta")
+        if model_pair is None:
+            log.warning("Meta model not loaded. Skipping meta step.")
+            features = []
+        else:
+            pred = predict_meta(model_pair, df[base_cols], {"params": {}})
+            f_df[out_name] = pred.reindex(f_df.index).values
+            features = [out_name]
     elif generator == "threshold_rule":
         f_df, features = generate_threshold_rule(f_df, gen_config)
     elif generator == "threshold_rule2":

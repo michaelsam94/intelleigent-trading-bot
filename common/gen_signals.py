@@ -70,17 +70,29 @@ def generate_combine_scores(df, config: dict):
     One score for price growth and one score for price fall. This function combines pairs
     of such scores and produce one score within [-1,+1]. Positive values mean growth
     and negative values mean fall of price.
+    combine "mean": average of all columns (e.g. high_20_05_lc, high_20_05_gb, high_20_05_xgb) -> one column.
     """
     columns = config.get('columns')
     if not columns:
-        raise ValueError(f"The 'columns' parameter must be a non-empty string. {type(columns)}")
-    elif not isinstance(columns, list) or len(columns) != 2:
-        raise ValueError(f"'columns' parameter must be a list with buy column name and sell column name. {type(columns)}")
+        raise ValueError(f"The 'columns' parameter must be a non-empty list. {type(columns)}")
+    if not isinstance(columns, list):
+        columns = [columns]
+    out_column = config.get('names')
+    if not out_column:
+        raise ValueError("'names' (output column name) must be set.")
 
+    if config.get("combine") == "mean" and len(columns) >= 2:
+        df[out_column] = df[columns].mean(axis=1, skipna=True)
+        if config.get("coefficient"):
+            df[out_column] = df[out_column] * config.get("coefficient")
+        if config.get("constant"):
+            df[out_column] = df[out_column] + config.get("constant")
+        return df, [out_column]
+
+    if len(columns) != 2:
+        raise ValueError(f"For combine difference/relative, 'columns' must be a list of exactly 2 column names. Got {len(columns)}.")
     up_column = columns[0]
     down_column = columns[1]
-
-    out_column = config.get('names')
 
     if config.get("combine") == "relative":
         combine_scores_relative(df, up_column, down_column, out_column)

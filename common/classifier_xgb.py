@@ -55,9 +55,11 @@ def train_xgb(df_X, df_y, model_config: dict):
         "n_estimators": n_estimators,
         "reg_alpha": train_conf.get("lambda_l1", train_conf.get("reg_alpha", 0.1)),
         "reg_lambda": train_conf.get("lambda_l2", train_conf.get("reg_lambda", 0.1)),
+        "subsample": train_conf.get("subsample", 1.0),
+        "colsample_bytree": train_conf.get("colsample_bytree", 1.0),
         "verbosity": 0,
-        "use_label_encoder": False,
-        "eval_metric": "logloss",
+        "use_label_encoder": train_conf.get("use_label_encoder", False),
+        "eval_metric": train_conf.get("eval_metric", "logloss"),
     }
     if scale_pos_weight is not None:
         xgb_params["scale_pos_weight"] = scale_pos_weight
