@@ -176,6 +176,7 @@ def generate_threshold_rule(df, config):
     """
     Apply rules based on thresholds and generate trade signal buy, sell or do nothing.
     If consecutive_bars > 1, require that many consecutive bars above/below threshold (reduces false entries).
+    If atr_column and atr_baseline are set, scale thresholds by ATR (adaptive: higher vol -> higher threshold).
     Returns signals in two pre-defined columns: 'buy_signal_column' and 'sell_signal_column'
     """
     parameters = config.get("parameters", {})
@@ -197,8 +198,18 @@ def generate_threshold_rule(df, config):
     buy_thresh = parameters.get("buy_signal_threshold")
     sell_thresh = parameters.get("sell_signal_threshold")
 
-    buy_raw = (df[score_col] >= buy_thresh)
-    sell_raw = (df[score_col] <= sell_thresh)
+    atr_col = config.get("atr_column")
+    atr_baseline = config.get("atr_baseline")
+    if atr_col and atr_col in df.columns and atr_baseline is not None and float(atr_baseline) > 0:
+        atr = df[atr_col].ffill().fillna(float(atr_baseline))
+        scale = (atr / float(atr_baseline)).clip(0.5, 2.0)
+        buy_thresh_arr = buy_thresh * scale
+        sell_thresh_arr = sell_thresh * scale
+        buy_raw = pd.Series(df[score_col].values >= buy_thresh_arr.values, index=df.index)
+        sell_raw = pd.Series(df[score_col].values <= sell_thresh_arr.values, index=df.index)
+    else:
+        buy_raw = (df[score_col] >= buy_thresh)
+        sell_raw = (df[score_col] <= sell_thresh)
 
     if consecutive_bars > 1:
         buy_raw = buy_raw.rolling(consecutive_bars, min_periods=consecutive_bars).min().fillna(0).astype(bool)

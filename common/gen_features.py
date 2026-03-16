@@ -257,11 +257,12 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
                 else:
                     out = fn(**args)
 
-                # Multi-output (e.g. MACD returns macd, signal, hist)
+                # Multi-output (e.g. MACD, BBANDS return multiple series)
                 if isinstance(out, (tuple, list)) and len(out) > 1:
+                    base = f"{col_out_names}_{func_name}" + (f"_{w}" if w else "")
                     multi_names = (
                         names if isinstance(names, list) and len(names) == len(out)
-                        else [f"{col_out_names}_{func_name}_{i}" for i in range(len(out))]
+                        else [f"{base}_{i}" for i in range(len(out))]
                     )
                     for i, o in enumerate(out):
                         s = pd.Series(o, index=df.index, dtype=float) if not isinstance(o, pd.Series) else o.copy()
@@ -725,6 +726,97 @@ def add_threshold_feature(df, column_name: str, thresholds: list, out_names: lis
                 df[out_name] = df[column_name] >= threshold  # All lows are greater than the (negative) threshold
 
     return out_names
+
+
+def generate_features_resampled(df: pd.DataFrame, full_config: dict, config: dict):
+    """
+    Resample to a higher timeframe (e.g. 5min), compute talib features, then reindex back to original index (ffill).
+    Use for multi-timeframe context (e.g. 5m RSI as feature for 1m model).
+    config: rule (e.g. "5T"), prefix (e.g. "5m"), talib config (columns, functions, windows).
+    """
+    time_col = full_config.get("time_column", "open_time")
+    if time_col not in df.columns:
+        raise ValueError(f"Resampled features need time column '{time_col}' in dataframe")
+    rule = config.get("rule", "5T")
+    prefix = config.get("prefix", "5m")
+    talib_cfg = config.get("talib", {"columns": ["close"], "functions": ["RSI", "LINEARREG_SLOPE"], "windows": [14, 10]})
+    time_idx = pd.DatetimeIndex(pd.to_datetime(df[time_col]))
+    tmp = df.set_index(time_idx)
+    resampled = tmp[["open", "high", "low", "close", "volume"]].resample(rule).agg({
+        "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum",
+    }).dropna(how="all").ffill()
+    features = generate_features_talib(resampled, talib_cfg, last_rows=0)
+    out_names = [f"{prefix}_{f}" for f in features]
+    for f in features:
+        s = resampled[f].reindex(time_idx, method="ffill")
+        df[f"{prefix}_{f}"] = s.values
+    return out_names
+
+
+def generate_features_regime_hmm(df: pd.DataFrame, config: dict):
+    """
+    Fit a 3-state Gaussian HMM on returns (or volatility); add regime state 0/1/2 as feature.
+    config: column (e.g. "close"), n_states (3), returns_type ("pct" or "log"), lookback (fit on last N rows, 0 = all).
+    """
+    try:
+        from hmmlearn import hmm
+    except ImportError:
+        raise ImportError("Install hmmlearn: pip install hmmlearn")
+
+    col = config.get("column", "close")
+    n_states = int(config.get("n_states", 3))
+    returns_type = config.get("returns_type", "pct")
+    lookback = config.get("lookback", 0)
+    out_col = config.get("out_column", "regime_hmm_3")
+
+    x = df[col].astype(float).dropna()
+    if returns_type == "log":
+        r = np.log(x / x.shift(1)).dropna().values
+    else:
+        r = (x.pct_change().dropna() * 100).values
+    if lookback > 0:
+        r = r[-lookback:]
+    r = r.reshape(-1, 1)
+
+    model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42)
+    model.fit(r)
+    states = model.predict(r)
+
+    # Map back to df index: align by position (last len(states) rows of df that have valid returns)
+    valid_idx = df[col].notna()
+    valid_idx = valid_idx & df[col].shift(1).notna()
+    valid_idx = valid_idx[valid_idx].index
+    if len(valid_idx) < len(states):
+        states = states[-len(valid_idx):]
+    elif len(valid_idx) > len(states):
+        valid_idx = valid_idx[-len(states):]
+    df.loc[valid_idx, out_col] = states
+    df[out_col] = df[out_col].ffill().bfill().astype(int)
+    return [out_col]
+
+
+def generate_features_fear_greed(df: pd.DataFrame, full_config: dict, config: dict):
+    """
+    Merge daily Fear & Greed Index (from data/fear_greed.csv) by date.
+    Run scripts/fetch_fear_greed.py first to download. Column name: fear_greed_value (and optional fear_greed_class).
+    """
+    time_col = full_config.get("time_column", "open_time")
+    if time_col not in df.columns:
+        raise ValueError(f"Fear & Greed feature needs time column '{time_col}'")
+    data_folder = Path(full_config.get("data_folder", "data"))
+    path = config.get("path") or (data_folder / "fear_greed.csv")
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Fear & Greed file not found: {path}. Run: python -m scripts.fetch_fear_greed -c <config>")
+    fg = pd.read_csv(path)
+    fg["date"] = pd.to_datetime(fg["date"]).dt.tz_localize(None).dt.normalize()
+    df_dates = pd.to_datetime(df[time_col]).dt.tz_localize(None).dt.normalize()
+    out_col = config.get("out_column", "fear_greed_value")
+    df[out_col] = df_dates.map(fg.set_index("date")["value"].to_dict()).ffill().bfill()
+    if "value_classification" in fg.columns:
+        df["fear_greed_class"] = df_dates.map(fg.set_index("date")["value_classification"].to_dict()).ffill().bfill()
+        return [out_col, "fear_greed_class"]
+    return [out_col]
 
 
 if __name__ == "__main__":

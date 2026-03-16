@@ -31,7 +31,9 @@
         {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close", "volume"], "functions": ["OBV"], "windows": [0]}},
         {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["high", "low", "close", "volume"], "functions": ["MFI"], "windows": [10, 20]}},
         {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["MACD"], "windows": [0]}},
-        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["high", "low", "close", "volume"], "functions": ["ADOSC"], "windows": [0]}}
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["high", "low", "close", "volume"], "functions": ["ADOSC"], "windows": [0]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["BBANDS"], "windows": [20]}},
+        {"column_prefix": "", "generator": "resampled_talib", "feature_prefix": "", "config": {"rule": "5T", "prefix": "5m", "talib": {"columns": ["close"], "functions": ["RSI", "LINEARREG_SLOPE"], "windows": [14, 10]}}}
     ],
 
     "label_sets": [
@@ -52,12 +54,15 @@
         "close_volume_OBV",
         "high_low_close_volume_MFI_10", "high_low_close_volume_MFI_20",
         "close_MACD_0", "close_MACD_1", "close_MACD_2",
-        "high_low_close_volume_ADOSC"
+        "high_low_close_volume_ADOSC",
+        "close_BBANDS_20_0", "close_BBANDS_20_1", "close_BBANDS_20_2",
+        "5m_close_RSI_14", "5m_close_LINEARREG_SLOPE_10"
     ],
     "labels": ["high_20_03", "high_20_05", "low_20_03", "low_20_05"],
     "algorithms": [
         {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": true}, "train": {"penalty": "l2", "C": 1.0, "class_weight": "balanced", "solver": "saga", "max_iter": 2000}},
-        {"name": "gb", "algo": "gb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary", "max_depth": 6, "learning_rate": 0.02, "num_boost_round": 500, "early_stopping_rounds": 50, "lambda_l1": 0.1, "lambda_l2": 0.1}}
+        {"name": "gb", "algo": "gb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary", "max_depth": 6, "learning_rate": 0.02, "num_boost_round": 500, "early_stopping_rounds": 50, "lambda_l1": 0.1, "lambda_l2": 0.1}},
+        {"name": "xgb", "algo": "xgb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary:logistic", "max_depth": 6, "learning_rate": 0.02, "n_estimators": 500, "early_stopping_rounds": 50, "lambda_l1": 0.1, "lambda_l2": 0.1}}
     ],
 
     "signal_sets": [
@@ -118,5 +123,16 @@
             "buy_signal_threshold": [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05],
             "sell_signal_threshold": [-0.01, -0.015, -0.02, -0.025, -0.03, -0.04, -0.05]
         }
+    },
+
+    "matrix_file_name": "matrix.csv",
+    "rolling_predict": {
+        "data_start": null,
+        "data_end": null,
+        "prediction_start": null,
+        "prediction_size": 10080,
+        "prediction_steps": 4,
+        "use_multiprocessing": false,
+        "max_workers": 8
     }
 }

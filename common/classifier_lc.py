@@ -35,11 +35,18 @@ def train_lc(df_X, df_y, model_config: dict):
 
     is_scale = params.get("is_scale", True)
     is_regression = params.get("is_regression", False)
+    use_rolling_zscore = params.get("use_rolling_zscore", False)
+    rolling_window = params.get("rolling_window", 100)
 
     #
     # Scale
     #
-    if is_scale:
+    if use_rolling_zscore:
+        from common.rolling_scaler import RollingZScoreScaler
+        scaler = RollingZScoreScaler(window=rolling_window)
+        scaler.fit(df_X)
+        X_train = scaler.transform(df_X)
+    elif is_scale:
         scaler = StandardScaler()
         scaler.fit(df_X)
         X_train = scaler.transform(df_X)

@@ -47,6 +47,12 @@ def generate_feature_set(df: pd.DataFrame, fs: dict, config: dict, model_store: 
         features = generate_features_tsfresh(f_df, gen_config, last_rows=last_rows)
     elif generator == "talib":
         features = generate_features_talib(f_df, gen_config, last_rows=last_rows)
+    elif generator == "resampled_talib":
+        features = generate_features_resampled(f_df, config, gen_config)
+    elif generator == "regime_hmm":
+        features = generate_features_regime_hmm(f_df, gen_config)
+    elif generator == "fear_greed":
+        features = generate_features_fear_greed(f_df, config, gen_config)
     elif generator == "itbstats":
         features = generate_features_itbstats(f_df, gen_config, last_rows=last_rows)
 
@@ -123,7 +129,10 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
 
             algo_name = model_config.get("name")
             algo_type = model_config.get("algo")
-            score_column_name = label + label_algo_separator + algo_name
+            if algo_type == "meta":
+                score_column_name = model_config.get("params", {}).get("score_column", "trade_score_meta")
+            else:
+                score_column_name = label + label_algo_separator + algo_name
 
             # It is an entry from loaded model dict
             model_pair = model_store.get_model_pair(score_column_name)  # Trained model from model registry
@@ -133,6 +142,19 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
             if algo_type == "gb":
                 from common.classifier_gb import predict_gb
                 df_y_hat = predict_gb(model_pair, train_df, model_config)
+            elif algo_type == "xgb":
+                from common.classifier_xgb import predict_xgb
+                df_y_hat = predict_xgb(model_pair, train_df, model_config)
+            elif algo_type == "lstm":
+                from common.classifier_lstm import predict_lstm
+                df_y_hat = predict_lstm(model_pair, train_df, model_config)
+            elif algo_type == "meta":
+                if score_column_name in out_df.columns:
+                    continue
+                from common.classifier_meta import predict_meta
+                base_cols = model_config.get("params", {}).get("base_columns", [])
+                df_meta = out_df[base_cols]
+                df_y_hat = predict_meta(model_pair, df_meta, model_config)
             elif algo_type == "nn":
                 from common.classifier_nn import predict_nn
                 df_y_hat = predict_nn(model_pair, train_df, model_config)
@@ -188,6 +210,16 @@ def train_feature_set(df, fs, config) -> dict:
                 from common.classifier_gb import train_gb
                 model_pair = train_gb(df_X, df_y, model_config)
                 models[score_column_name] = model_pair
+            elif algo_type == "xgb":
+                from common.classifier_xgb import train_xgb
+                model_pair = train_xgb(df_X, df_y, model_config)
+                models[score_column_name] = model_pair
+            elif algo_type == "lstm":
+                from common.classifier_lstm import train_lstm
+                model_pair = train_lstm(df_X, df_y, model_config)
+                models[score_column_name] = model_pair
+            elif algo_type == "meta":
+                continue
             elif algo_type == "nn":
                 from common.classifier_nn import train_nn
                 model_pair = train_nn(df_X, df_y, model_config)
@@ -202,6 +234,33 @@ def train_feature_set(df, fs, config) -> dict:
                 models[score_column_name] = model_pair
             else:
                 raise ValueError(f"Unknown algorithm type {algo_type}. Check algorithm list.")
+
+    meta_cfg = next((a for a in algorithms if a.get("algo") == "meta"), None)
+    if meta_cfg is not None:
+        from common.classifier_meta import train_meta
+        from common.classifier_lc import predict_lc
+        from common.classifier_gb import predict_gb
+        from common.classifier_xgb import predict_xgb
+        base_cols = meta_cfg.get("params", {}).get("base_columns", [])
+        if len(base_cols) == 6 and len(labels) >= 2:
+            preds = {}
+            for col in base_cols:
+                pair = models.get(col)
+                if pair is None:
+                    break
+                algo_name = col.split("_")[-1]
+                cfg = find_algorithm_by_name(config.get("algorithms", []), algo_name)
+                if algo_name == "lc":
+                    preds[col] = predict_lc(pair, train_df[train_features], cfg)
+                elif algo_name == "gb":
+                    preds[col] = predict_gb(pair, train_df[train_features], cfg)
+                elif algo_name == "xgb":
+                    preds[col] = predict_xgb(pair, train_df[train_features], cfg)
+            if len(preds) == 6:
+                df_meta = pd.DataFrame(preds, index=train_df.index)
+                df_y_meta = train_df[labels[0]].astype(float) - train_df[labels[1]].astype(float)
+                model_pair = train_meta(df_meta, df_y_meta, meta_cfg)
+                models[meta_cfg.get("params", {}).get("score_column", "trade_score_meta")] = model_pair
 
     return models
 
