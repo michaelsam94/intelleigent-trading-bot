@@ -45,6 +45,15 @@ Order: Download → Merge (--train) → Features → Labels → **Check label ba
 
 Only continue to train when all labels are in 25–55%. Do not start the live server until `scripts.simulate` shows positive return over at least 14 days.
 
+## If labels are mostly False (e.g. &lt;15% True)
+
+The gate expects 25–55% True. If you see 2–12% True, the label rules are too strict for your data. In the 1min realtime configs we use:
+
+- **thresholds**: `[0.2, 0.35]` — label True when price moves 0.2% or 0.35% in 15 bars (was 0.3, 0.5).
+- **tolerance**: `0.4` — allow pullback of 0.4× threshold before the move (was 0.2), so the “opposite” threshold is looser and more bars qualify.
+
+Regenerate labels after changing `label_sets` (run pipeline from features → labels, then check balance again). If still skewed, try `thresholds`: `[0.15, 0.25]` and/or `tolerance`: `0.5`.
+
 ## Config fixes already applied (1min realtime configs)
 
 - **Class weighting**: LC `class_weight: "balanced"`, solver `saga`, `max_iter: 2000`; GB `is_unbalance: true`, `max_depth: 6`, `learning_rate: 0.02`, `num_boost_round: 500`.
