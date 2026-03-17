@@ -32,8 +32,10 @@ def predict_meta(models: tuple, df_X_test: pd.DataFrame, model_config: dict):
         missing = [c for c in cols if c not in df_X_test.columns]
         if missing:
             raise ValueError(f"Meta model needs columns {cols}. Missing: {missing}")
-        df_X_test = df_X_test[list(cols)]
-    pred = model.predict(df_X_test.values)
+        df_X_test = df_X_test[list(cols)].copy()
+    # Ridge does not accept NaN; fill with 0 (neutral) so realtime rows with missing base scores still get a prediction
+    X = df_X_test.fillna(0.0)
+    pred = model.predict(X)
     return pd.Series(pred, index=df_X_test.index)
 
 
