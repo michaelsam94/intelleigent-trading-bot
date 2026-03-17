@@ -151,6 +151,9 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
             else:
                 score_column_name = label + label_algo_separator + algo_name
 
+            if algo_type == "meta":
+                continue
+
             model_pair = model_store.get_model_pair(score_column_name)
             if model_pair is None:
                 log.warning("Model '%s' not loaded (missing or failed). Skip predict.", score_column_name)
@@ -167,13 +170,6 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
             elif algo_type == "lstm":
                 from common.classifier_lstm import predict_lstm
                 df_y_hat = predict_lstm(model_pair, train_df, model_config)
-            elif algo_type == "meta":
-                if score_column_name in out_df.columns:
-                    continue
-                from common.classifier_meta import predict_meta
-                base_cols = model_config.get("params", {}).get("base_columns", [])
-                df_meta = out_df[base_cols]
-                df_y_hat = predict_meta(model_pair, df_meta, model_config)
             elif algo_type == "nn":
                 from common.classifier_nn import predict_nn
                 df_y_hat = predict_nn(model_pair, train_df, model_config)
@@ -190,6 +186,25 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
             df_y_hat = df_y_hat.reindex(train_df.index).values
             out_df[score_column_name] = df_y_hat
             features.append(score_column_name)
+
+    # Meta predict once, after all base columns exist in out_df
+    meta_cfg = next((a for a in algorithms if a.get("algo") == "meta"), None)
+    if meta_cfg is not None:
+        score_column_name = meta_cfg.get("params", {}).get("score_column", "trade_score_meta")
+        if score_column_name not in out_df.columns:
+            model_pair = model_store.get_model_pair(score_column_name)
+            if model_pair is not None:
+                base_cols = meta_cfg.get("params", {}).get("base_columns", [])
+                missing = [c for c in base_cols if c not in out_df.columns]
+                if not missing:
+                    from common.classifier_meta import predict_meta
+                    df_y_hat = predict_meta(model_pair, out_df[base_cols], meta_cfg)
+                    df_y_hat = df_y_hat.reindex(train_df.index).values
+                    out_df[score_column_name] = df_y_hat
+                    features.append(score_column_name)
+                    print(f"Predict '{score_column_name}'. Algorithm meta. Train length {len(train_df)}.")
+                else:
+                    log.warning("Meta skipped: base columns missing in out_df: %s", missing[:3])
 
     return out_df, features
 
