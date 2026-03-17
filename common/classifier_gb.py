@@ -58,16 +58,15 @@ def train_gb(df_X, df_y, model_config: dict):
     lambda_l1 = train_conf.get("lambda_l1")
     lambda_l2 = train_conf.get("lambda_l2")
 
+    num_leaves = train_conf.get("num_leaves", 31)
+    n_jobs = train_conf.get("n_jobs", -1)
+    n_threads = n_jobs if n_jobs != -1 else 0
     lgbm_params = {
         'learning_rate': learning_rate,
-        'max_depth': max_depth,  # Can be -1
-        #"n_estimators": 10000,
-
-        #"min_split_gain": params['min_split_gain'],
-        "min_data_in_leaf": min(int(0.01 * len(df_X)), 150),  # Cap so trees can keep splitting (avoids "no more leaves" early stop)
-        #'subsample': 0.8,
-        #'colsample_bytree': 0.8,
-        'num_leaves': 32,  # or (2 * 2**max_depth)
+        'max_depth': max_depth,
+        "num_threads": n_threads if n_threads else 0,
+        "min_data_in_leaf": min(int(0.01 * len(df_X)), 150),
+        'num_leaves': num_leaves,
         #"bagging_freq": 5,
         #"bagging_fraction": 0.4,
         #"feature_fraction": 0.05,

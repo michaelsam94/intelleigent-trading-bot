@@ -70,10 +70,11 @@ def train_lc(df_X, df_y, model_config: dict):
         return (model, scaler)
 
     #
-    # Create model
+    # Create model (n_jobs=-1 for parallel fit; solver lbfgs is faster than saga for L2)
     #
     train_conf = model_config.get("train", {})
-    args = {k: v for k, v in train_conf.items() if k not in ("n_jobs", "penalty")}
+    args = {k: v for k, v in train_conf.items() if k not in ("penalty",)}
+    args.setdefault("n_jobs", -1)
     args["verbose"] = 0
     model = LogisticRegression(**args)
 
