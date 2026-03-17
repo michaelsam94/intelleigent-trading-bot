@@ -48,6 +48,7 @@ def train_xgb(df_X, df_y, model_config: dict):
         if n_pos > 0:
             scale_pos_weight = n_neg / n_pos
 
+    # tree_method='hist' is much faster than 'exact' on large data; n_jobs uses all cores
     xgb_params = {
         "objective": train_conf.get("objective", "binary:logistic"),
         "max_depth": train_conf.get("max_depth", 6),
@@ -57,6 +58,9 @@ def train_xgb(df_X, df_y, model_config: dict):
         "reg_lambda": train_conf.get("lambda_l2", train_conf.get("reg_lambda", 0.1)),
         "subsample": train_conf.get("subsample", 1.0),
         "colsample_bytree": train_conf.get("colsample_bytree", 1.0),
+        "tree_method": train_conf.get("tree_method", "hist"),
+        "max_bin": train_conf.get("max_bin", 256),
+        "n_jobs": train_conf.get("n_jobs", -1),
         "verbosity": 0,
         "use_label_encoder": train_conf.get("use_label_encoder", False),
         "eval_metric": train_conf.get("eval_metric", "logloss"),

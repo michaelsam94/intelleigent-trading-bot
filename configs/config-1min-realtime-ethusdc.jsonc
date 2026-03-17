@@ -63,7 +63,7 @@
     "algorithms": [
         {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": true}, "train": {"penalty": "l2", "C": 1.0, "class_weight": "balanced", "solver": "saga", "max_iter": 2000}},
         {"name": "gb", "algo": "gb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary", "max_depth": 6, "learning_rate": 0.02, "num_boost_round": 500, "early_stopping_rounds": 50, "lambda_l1": 0.1, "lambda_l2": 0.1}},
-        {"name": "xgb", "algo": "xgb", "params": {"is_scale": true, "length": 0}, "train": {"max_depth": 5, "learning_rate": 0.02, "n_estimators": 500, "early_stopping_rounds": 50, "reg_alpha": 0.1, "reg_lambda": 0.1, "subsample": 0.8, "colsample_bytree": 0.8, "eval_metric": "logloss", "use_label_encoder": false}},
+        {"name": "xgb", "algo": "xgb", "params": {"is_scale": true, "length": 0}, "train": {"max_depth": 4, "learning_rate": 0.05, "n_estimators": 300, "early_stopping_rounds": 30, "reg_alpha": 0.1, "reg_lambda": 0.1, "subsample": 0.8, "colsample_bytree": 0.8, "tree_method": "hist", "max_bin": 256, "n_jobs": -1, "eval_metric": "logloss", "use_label_encoder": false}},
         {"name": "meta", "algo": "meta", "params": {"score_column": "trade_score_meta", "base_columns": ["high_20_05_lc", "high_20_05_gb", "high_20_05_xgb", "low_20_05_lc", "low_20_05_gb", "low_20_05_xgb"]}}
     ],
 
