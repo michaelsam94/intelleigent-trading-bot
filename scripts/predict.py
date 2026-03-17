@@ -146,6 +146,8 @@ def main(config_file):
     # For each predicted column, find the corresponding true label column and then compare them
     for score_column_name in labels_hat_df.columns:
         label_column, _ = score_to_label_algo_pair(score_column_name)
+        if label_column not in out_df.columns:
+            continue
 
         # Drop nans from scores
         df_scores = pd.DataFrame({"y_true": out_df[label_column], "y_predicted": out_df[score_column_name]})
