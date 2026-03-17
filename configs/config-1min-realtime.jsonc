@@ -100,7 +100,6 @@
             "reset_balance_on_restart": true,
             "daily_drawdown_limit_pct": 90,
             "min_bars_between_trades": 5,
-            "short_trend_filter_column": "close_LINEARREG_SLOPE_60",
             "tp_sl": {
                 "atr_column": "high_low_close_ATR_14",
                 "tp_atr_mult": 4.0,
