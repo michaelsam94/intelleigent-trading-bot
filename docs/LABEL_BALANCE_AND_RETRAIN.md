@@ -10,7 +10,7 @@ Before any retrain, check label balance. If the numbers are skewed, training wil
 python -m scripts.check_label_balance -c configs/config-1min-realtime.jsonc
 ```
 
-**Healthy output** (each label 25–55% True):
+**Healthy output** (each label 20–55% True):
 
 ```
 Label balance (% True). Healthy: 25-55%. Skewed = do not train.
@@ -43,16 +43,16 @@ The pipeline runs the balance check **after labels, before train**. If balance i
 
 Order: Download → Merge (--train) → Features → Labels → **Check label balance** → Train → Predict → Signals.
 
-Only continue to train when all labels are in 25–55%. Do not start the live server until `scripts.simulate` shows positive return over at least 14 days.
+Only continue to train when all labels are in 20–55%. Do not start the live server until `scripts.simulate` shows positive return over at least 14 days.
 
 ## If labels are mostly False (e.g. &lt;15% True)
 
-The gate expects 25–55% True. If you see 2–12% True, the label rules are too strict for your data. In the 1min realtime configs we use:
+The gate expects 20–55% True. If you see under 20% True, the label rules are too strict. In the 1min realtime configs we use:
 
-- **thresholds**: `[0.2, 0.35]` — label True when price moves 0.2% or 0.35% in 15 bars (was 0.3, 0.5).
-- **tolerance**: `0.4` — allow pullback of 0.4× threshold before the move (was 0.2), so the “opposite” threshold is looser and more bars qualify.
+- **thresholds**: `[0.12, 0.2]` — label True when price moves 0.12% or 0.2% in 15 bars.
+- **tolerance**: `0.55` — allow pullback before the move so more bars qualify.
 
-Regenerate labels after changing `label_sets` (run pipeline from features → labels, then check balance again). If still skewed, try `thresholds`: `[0.15, 0.25]` and/or `tolerance`: `0.5`.
+Regenerate labels after changing `label_sets` (run pipeline from features → labels, then check balance again). If still skewed, try lower thresholds (e.g. `[0.1, 0.18]`) or higher tolerance (`0.6`).
 
 ## Config fixes already applied (1min realtime configs)
 

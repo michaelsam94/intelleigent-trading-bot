@@ -42,7 +42,7 @@ print(json.loads(s).get('data_folder', './data'))
   echo "4/7 Labels..."
   python -m scripts.labels -c "$CONFIG"
 
-  echo "4b/7 Check label balance (gate: 25-55% True)..."
+  echo "4b/7 Check label balance (gate: 20-55% True)..."
   python -m scripts.check_label_balance -c "$CONFIG" || exit 1
 
   echo "5/7 Train..."

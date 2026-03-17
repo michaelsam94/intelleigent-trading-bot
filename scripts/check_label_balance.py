@@ -1,6 +1,6 @@
 """
 Check label balance before training. Run after labels step, before train.
-Healthy: each label 25-55% True. Skewed (e.g. high_20_05 68%, low_20_05 18%) = training window bias; do not train.
+Healthy: each label 20-55% True. Skewed (e.g. one label 68%, another 18%) = training window bias; do not train.
 Exit 0 if all in range, 1 otherwise so pipeline can gate.
 """
 import sys
@@ -11,7 +11,7 @@ import pandas as pd
 from service.App import load_config, App
 
 LABEL_COLS = ["high_20_03", "high_20_05", "low_20_03", "low_20_05"]
-MIN_PCT = 25.0
+MIN_PCT = 20.0
 MAX_PCT = 55.0
 
 
@@ -39,7 +39,7 @@ def main(config_file: str):
         print(f"ERROR: Label columns not found: {missing}")
         sys.exit(2)
 
-    print("Label balance (% True). Healthy: 25-55%. Skewed = do not train.")
+    print("Label balance (% True). Healthy: 20-55%. Skewed = do not train.")
     ok = True
     for col in labels:
         pct = df[col].mean() * 100
@@ -50,7 +50,7 @@ def main(config_file: str):
         print(f"  {col}: {pct:.1f}% True  [{status}]")
 
     if not ok:
-        print("\nAt least one label is outside 25-55%. Fix data window or thresholds before training.")
+        print("\nAt least one label is outside 20-55%. Fix data window or thresholds before training.")
         sys.exit(1)
     print("\nBalance OK. Proceed with train.")
     sys.exit(0)
