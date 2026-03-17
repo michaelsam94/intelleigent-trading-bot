@@ -151,46 +151,36 @@ def _first_location_of_crossing_threshold(df, horizon, threshold, close_column_n
     close = np.asarray(df[close_column_name], dtype=np.float64)
     price = np.asarray(df[price_column_name], dtype=np.float64)
     n = len(close)
-    # Use fast numba path when available; otherwise fall back to rolling (slow for large n).
+    # Prefer numba when available (fast); else use a pure Python loop (avoids pandas rolling 2D apply issues).
     if njit is not None and n > 2000:
         if threshold > 0:
             out = _first_cross_high_numba(close, price, horizon, threshold)
         else:
             out = _first_cross_low_numba(close, price, horizon, threshold)
-        out = pd.Series(out, index=df.index)
-        out = out.replace(-1, np.nan)
-        return out
-    # Fallback: rolling apply (slow for 60k+ rows)
-    def fn_high(x):
-        if len(x) < 2:
-            return np.nan
-        p = x[0, 0]
-        p_threshold = p * (1 + (threshold / 100.0))
-        idx = np.argmax(x[1:, 1] > p_threshold)
-        if idx == 0 and x[1, 1] <= p_threshold:
-            return np.nan
-        return idx
-
-    def fn_low(x):
-        if len(x) < 2:
-            return np.nan
-        p = x[0, 0]
-        p_threshold = p * (1 + (threshold / 100.0))
-        idx = np.argmax(x[1:, 1] < p_threshold)
-        if idx == 0 and x[1, 1] >= p_threshold:
-            return np.nan
-        return idx
-
-    rl = df[[close_column_name, price_column_name]].rolling(
-        horizon + 1, min_periods=(horizon // 2), method="table"
-    )
-    if threshold > 0:
-        df_out = rl.apply(fn_high, raw=True)
     else:
-        df_out = rl.apply(fn_low, raw=True)
-    df_out = df_out.shift(-horizon)
-    out_column = df_out.iloc[:, 0] if df_out.ndim > 1 else df_out
-    return out_column
+        out = _first_cross_python(close, price, horizon, threshold)
+    out = pd.Series(out, index=df.index)
+    out = out.replace(-1, np.nan)
+    return out
+
+
+def _first_cross_python(close, price, horizon, threshold):
+    """Pure Python version of first-cross index. -1 if no cross. Same semantics as numba versions."""
+    n = len(close)
+    out = np.full(n, -1, dtype=np.int64)
+    mult = 1.0 + (threshold / 100.0)
+    for i in range(n - horizon):
+        ref = close[i] * mult
+        for j in range(1, horizon + 1):
+            if threshold > 0:
+                if price[i + j] > ref:
+                    out[i + horizon] = j - 1
+                    break
+            else:
+                if price[i + j] < ref:
+                    out[i + horizon] = j - 1
+                    break
+    return out
 
 
 if njit is not None:
