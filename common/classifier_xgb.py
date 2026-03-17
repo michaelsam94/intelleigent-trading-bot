@@ -70,7 +70,9 @@ def train_xgb(df_X, df_y, model_config: dict):
     fit_kw = dict(X=X_train, y=y_train)
     if valid_set is not None:
         fit_kw["eval_set"] = [valid_set]
-        fit_kw["verbose"] = False
+        fit_kw["verbose"] = 100
+    else:
+        fit_kw["verbose"] = 100
 
     model = xgb.XGBClassifier(**xgb_params)
     model.fit(**fit_kw)

@@ -101,6 +101,30 @@ To retrain every week and then restart the server:
 
 ---
 
+## 6. PM2 start on reboot
+
+To have PM2 bring up all services automatically after a server reboot:
+
+1. **Save the current process list** (run from project root after you have started your apps with `pm2 start ecosystem.config.cjs` or equivalent):
+
+   ```bash
+   pm2 save
+   ```
+
+2. **Generate and install the startup script** (run the command that PM2 prints; it usually needs `sudo`):
+
+   ```bash
+   pm2 startup
+   ```
+
+   PM2 will print something like:
+   `sudo env PATH=... pm2 startup systemd -u ubuntu --hp /home/ubuntu`
+   Copy and run that exact line.
+
+3. After that, every reboot will run `pm2 resurrect` and restore the saved processes. To change what gets restored, adjust your apps, then run `pm2 save` again.
+
+---
+
 ## Checklist
 
 | Step | Command / action |
@@ -111,3 +135,4 @@ To retrain every week and then restart the server:
 | 4. Restart | `pm2 restart all` (or restart your server process) |
 | 5. (Optional) Walk-forward | `python -m scripts.predict_rolling -c configs/config-1min-realtime.jsonc` |
 | 6. (Optional) Cron | Add weekly retrain + `pm2 restart all` to crontab |
+| 7. (Optional) Reboot | `pm2 save` then `pm2 startup` (run the printed sudo command) so services start after reboot |
