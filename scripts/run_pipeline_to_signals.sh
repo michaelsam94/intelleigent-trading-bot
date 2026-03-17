@@ -33,7 +33,7 @@ print(json.loads(s).get('data_folder', './data'))
   echo "1/7 Download..."
   python -m scripts.download -c "$CONFIG"
 
-  echo "2/7 Merge (--train for 60k bars)..."
+  echo "2/7 Merge (--train for train_length bars, e.g. 120k)..."
   python -m scripts.merge -c "$CONFIG" --train
 
   echo "3/7 Features..."
@@ -41,6 +41,9 @@ print(json.loads(s).get('data_folder', './data'))
 
   echo "4/7 Labels..."
   python -m scripts.labels -c "$CONFIG"
+
+  echo "4b/7 Check label balance (gate: 25-55% True)..."
+  python -m scripts.check_label_balance -c "$CONFIG" || exit 1
 
   echo "5/7 Train..."
   TRAIN_MODE=$(python -c "

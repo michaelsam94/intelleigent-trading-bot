@@ -75,7 +75,7 @@ def train_gb(df_X, df_y, model_config: dict):
         "lambda_l1": lambda_l1,
         "lambda_l2": lambda_l2,
 
-        'is_unbalance': 'true',
+        'is_unbalance': train_conf.get("is_unbalance", True),
         # 'scale_pos_weight': scale_pos_weight,  # is_unbalance must be false
 
         'boosting_type': 'gbdt',  # dart (slow but best, worse than gbdt), goss, gbdt
