@@ -107,8 +107,9 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `signal_sets` | array | Each item defines a signal generator. |
-| `signal_sets[].generator` | string | `"combine"` or `"threshold_rule"`. |
-| `"combine"` config | | `columns`: `["high_20_lc", "low_20_lc"]`, `names`: `"trade_score"`, `combine`: `"difference"`. |
+| `signal_sets[].generator` | string | `"combine"`, `"meta"`, or `"threshold_rule"`. |
+| `"combine"` config | | `columns`, `names`, `combine`: `"mean"` or `"difference"`. Builds e.g. `high_score` / `low_score` from base algo columns. |
+| `"meta"` config | | `columns`: 6 base columns (high_20_05_lc/gb/xgb, low_20_05_lc/gb/xgb), `name`: `"trade_score"`. **Meta-learner** (Ridge) combines the 6 inputs into a single `trade_score`; use this as the final combiner instead of a crude difference. |
 | `"threshold_rule"` config | | `columns`: `"trade_score"`, `parameters.buy_signal_threshold`: `0.015`, `parameters.sell_signal_threshold`: `-0.015`. Optional `consecutive_bars`: require this many consecutive bars above/below threshold before opening (e.g. `2` reduces false entries). |
 
 ---
@@ -160,3 +161,4 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | **BTCUSDC + ETHUSDC** | Run **two processes** (one config per pair). **PM2:** from project root run `pm2 start ecosystem.config.cjs` (starts both). Or CLI: `pm2 start python --name server-btcusdc --interpreter none -- -m service.server -c configs/config-1min-realtime.jsonc` then same for `config-1min-realtime-ethusdc.jsonc` with `--name server-ethusdc`. |
 | **No new trades (BUY/SELL ZONE but no open)** | Usually **daily drawdown limit**: once daily P&amp;L hits `daily_drawdown_limit_pct` (e.g. 5%), new trades are paused until the next calendar day. To allow more: set `daily_drawdown_limit_pct` higher or remove/comment it out to disable. Server log: "Skipping open: daily drawdown limit reached (paused)." |
 | **Backtesting (simulate)** | `scripts/simulate` needs `data/<SYMBOL>/signals.csv`. That file is produced by the pipeline. From project root run `./scripts/run_pipeline_to_signals.sh configs/config-1min-realtime.jsonc` (set `"train": true` in the config for the train step, then set back to `false` for the server). Then run `python -m scripts.simulate -c configs/config-1min-realtime.jsonc`. |
+| **OOS validation (predict_rolling)** | Run `python -m scripts.predict_rolling -c configs/config-1min-realtime.jsonc` (after pipeline through **labels** so `data/<SYMBOL>/matrix.csv` exists). Scores are written to `data/<SYMBOL>/prediction-metrics.txt` (or `prediction_metrics_file` in config). **Check:** OOS precision on `high_20_05` and `low_20_05` &gt; 0.52 across folds = model is real; near 0.50 = features need work before going live. |

@@ -235,16 +235,17 @@ def main(config_file):
     print(f"Predictions stored in file: {out_path}. Length: {len(out_df)}. Columns: {len(out_df.columns)}")
 
     #
-    # Compute and store scores
+    # Compute and store scores (OOS = out-of-sample)
     #
-    score_lines = []
-    # For each predicted column, find the corresponding true label column and then compare them
+    score_lines = [
+        "# OOS precision > 0.52 on high_20_05 and low_20_05 = model is real; near 0.50 = features need work.",
+        ""
+    ]
     for score_column_name in labels_hat_df.columns:
         label_column, _ = score_to_label_algo_pair(score_column_name)
         if label_column not in out_df.columns:
             continue
 
-        # Drop nans from scores
         df_scores = pd.DataFrame({"y_true": out_df[label_column], "y_predicted": out_df[score_column_name]})
         df_scores = df_scores.dropna()
 
@@ -253,16 +254,14 @@ def main(config_file):
         y_predicted_class = np.where(y_predicted.values > 0.5, 1, 0)
 
         if ptypes.is_float_dtype(y_true) and ptypes.is_float_dtype(y_predicted):
-            score = compute_scores_regression(y_true, y_predicted)  # Regression stores
+            score = compute_scores_regression(y_true, y_predicted)
         else:
-            score = compute_scores(y_true.astype(int), y_predicted)  # Classification stores
+            score = compute_scores(y_true.astype(int), y_predicted)
 
         score_lines.append(f"{score_column_name}: {score}")
 
-    #
-    # Store scores
-    #
-    score_path = out_path.with_suffix('.txt')
+    metrics_file = config.get("prediction_metrics_file") or out_path.with_suffix(".txt").name
+    score_path = data_path / metrics_file
     with open(score_path, "a+") as f:
         f.write("\n".join([str(x) for x in score_lines]) + "\n\n")
 
@@ -295,7 +294,7 @@ def execute_train_predict_step(config: dict, train_df: pd.DataFrame, predict_df:
     #
 
     fs_now = datetime.now()
-    print(f"Start train all models from {len(train_feature_sets)} feature sets {"sequentially" if not parallel else "in parallel"}. Train set size:  {len(train_df)} ")
+    print(f"Start train all models from {len(train_feature_sets)} feature sets {'sequentially' if not parallel else 'in parallel'}. Train set size: {len(train_df)}")
 
     models = dict()
     if isinstance(parallel, Parallel):
