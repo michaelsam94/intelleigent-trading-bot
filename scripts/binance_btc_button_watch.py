@@ -319,16 +319,6 @@ def main():
                         print(f"\r  Timer: {ts} ({timer_sec}s)  ", end="", flush=True)
                         last_timer_sec = timer_sec
 
-                    # Periodic status line for logs (so cron/redirect show the script is alive and current timer)
-                    now_mono = time.monotonic()
-                    if last_status_log == 0.0:
-                        last_status_log = now_mono  # prime so first log is after STATUS_LOG_INTERVAL
-                    if (now_mono - last_status_log) >= STATUS_LOG_INTERVAL:
-                        last_status_log = now_mono
-                        stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        threshold = (leaderboard_best_sec if leaderboard_best_sec is not None else args.best_time) or "?"
-                        print(f"\n  [{stamp} UTC] Timer: {ts} ({timer_sec}s) — waiting for ≤{threshold}s to click")
-
                     if timer_sec <= args.notify_under and timer_sec != last_notify_sec:
                         last_notify_sec = timer_sec
                         print(f"\n  >>> LOW TIMER: {ts} - consider clicking now! <<<")
@@ -378,6 +368,20 @@ def main():
                                     continue
                         elif effective_best is None and timer_sec <= 3:
                             print("\n  [No leaderboard best or --best-time; skipping auto-click. Set --best-time SEC to override.]")
+
+                # Periodic status line every 30s (always, even if timer not detected) so logs show script is alive
+                now_mono = time.monotonic()
+                if last_status_log == 0.0:
+                    last_status_log = now_mono
+                if (now_mono - last_status_log) >= STATUS_LOG_INTERVAL:
+                    last_status_log = now_mono
+                    stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    threshold = (leaderboard_best_sec if leaderboard_best_sec is not None else args.best_time) or "?"
+                    if timer_sec is not None:
+                        mm, ss = divmod(timer_sec, 60)
+                        print(f"\n  [{stamp} UTC] Timer: {mm}:{ss:02d} ({timer_sec}s) — waiting for ≤{threshold}s to click")
+                    else:
+                        print(f"\n  [{stamp} UTC] Still running — timer not detected (page may differ); waiting for ≤{threshold}s to click")
 
                 time.sleep(POLL_INTERVAL_SEC)
         except KeyboardInterrupt:
