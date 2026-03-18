@@ -9,8 +9,15 @@ Disclaimer: Best backtest parameters do NOT guarantee future profit. Past perfor
 predictive; use longer backtest windows and validate before going live.
 """
 import re
+import sys
 import argparse
 from pathlib import Path
+
+# Allow running as python scripts/apply_best_simulation.py (project root on path)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from service.App import load_config, App
 
