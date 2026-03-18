@@ -416,9 +416,11 @@ def main():
                     last_status_log = now_mono
                     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     threshold = (leaderboard_best_sec if leaderboard_best_sec is not None else args.best_time) or "?"
-                    if timer_sec is not None:
-                        mm, ss = divmod(timer_sec, 60)
-                        print(f"\n  [{stamp} UTC] Timer: {mm}:{ss:02d} ({timer_sec}s) — waiting for ≤{threshold}s to click")
+                    # Use current timer, or last seen if this poll missed it (avoids "not detected" when timer is working)
+                    sec = timer_sec if timer_sec is not None else last_timer_sec
+                    if sec is not None:
+                        mm, ss = divmod(sec, 60)
+                        print(f"\n  [{stamp} UTC] Timer: {mm}:{ss:02d} ({sec}s) — waiting for ≤{threshold}s to click")
                     else:
                         print(f"\n  [{stamp} UTC] Still running — timer not detected (page may differ); waiting for ≤{threshold}s to click")
 
