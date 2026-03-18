@@ -4,6 +4,9 @@ Read simulation results (signal_models.txt), pick the run with the highest gain
 (total_return_pct or %profit), and update the config so threshold_rule uses those parameters.
 Run after: python -m scripts.simulate -c config.jsonc -d 14  (with starting_balance so total_return_pct exists).
 Usage: python -m scripts.apply_best_simulation -c configs/config-1min-realtime.jsonc [--dry-run]
+
+Disclaimer: Best backtest parameters do NOT guarantee future profit. Past performance is not
+predictive; use longer backtest windows and validate before going live.
 """
 import re
 import argparse
@@ -85,6 +88,7 @@ def main():
     print(f"Best run: total_return_pct/%profit = {best_gain}")
     print(f"  buy_signal_threshold:  {best_buy}")
     print(f"  sell_signal_threshold: {best_sell}")
+    print("  (Backtest best does not guarantee future profit; validate over longer periods.)")
 
     if args.dry_run:
         print("Dry run: config not modified.")
@@ -98,15 +102,25 @@ def main():
     with open(config_path) as f:
         text = f.read()
 
-    # Replace threshold values in threshold_rule parameters (preserve JSONC)
-    # Match "buy_signal_threshold": 0.015 or 0.015,
-    old_buy_pat = re.compile(r'("buy_signal_threshold"\s*:\s*)[-0-9.]+')
-    old_sell_pat = re.compile(r'("sell_signal_threshold"\s*:\s*)[-0-9.]+')
-    new_text = old_buy_pat.sub(rf'\g<1>{best_buy}', text, count=1)
-    new_text = old_sell_pat.sub(rf'\g<1>{best_sell}', new_text, count=1)
+    # Replace only in signal_sets (before simulate_model) so we don't touch the grid
+    if "simulate_model" in text:
+        head, tail = text.split("simulate_model", 1)
+        search_text = head
+        rest = "simulate_model" + tail
+    else:
+        search_text = text
+        rest = ""
+
+    # Match "buy_signal_threshold": 0.015 (double or single quotes, optional spaces)
+    old_buy_pat = re.compile(r'(["\']buy_signal_threshold["\']\s*:\s*)[-0-9.]+')
+    old_sell_pat = re.compile(r'(["\']sell_signal_threshold["\']\s*:\s*)[-0-9.]+')
+    new_search = old_buy_pat.sub(rf'\g<1>{best_buy}', search_text, count=1)
+    new_search = old_sell_pat.sub(rf'\g<1>{best_sell}', new_search, count=1)
+    new_text = new_search + rest if rest else new_search
 
     if new_text == text:
         print("WARNING: No threshold_rule parameters found in config; nothing updated.")
+        print(f"  Config path: {config_path}")
         return 0
 
     with open(config_path, "w") as f:
