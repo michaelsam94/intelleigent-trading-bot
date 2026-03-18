@@ -118,10 +118,14 @@ python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.js
 
 # Test that the button can be found and clicked (uses 1 attempt, then exits)
 python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json --test-click --headless
+
+# See which element we would click, without clicking (no attempt used). Use if --test-click did not update "Last Attempt".
+python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json --test-find-button --headless
 ```
 
 - **Ctrl+C** stops the script.
-- **Test click**: Use `--test-click` to open the page, find the game button, click it once, and exit. Prints `[OK] Button found and clicked` or `[FAIL] Could not find or click the button`. **Uses one attempt** if the click succeeds.
+- **Test click**: Use `--test-click` to open the page, find the game button, click it once, and exit. Prints `[OK] Button found and clicked` or `[FAIL]`. **Uses one attempt** if the click succeeds. If Binance "Last Attempt" does **not** update to today, the script may have clicked a different element (e.g. another button); use `--test-find-button` next to see what we match.
+- **Test find button**: Use `--test-find-button` to list which element(s) the script would click (selector, frame, tag, class). **Does not click** and does not use an attempt. Use this to confirm we target the real game button, or to get the button's class so it can be added to the script.
 - **One-shot**: Use `--one-shot` so the script makes **one** attempt (one click when conditions are met), sends the email report if SMTP env vars are set, then exits. This avoids using multiple attempts in one run; schedule the script (e.g. with cron) to run periodically.
 - **Email body** contains: attempt used (e.g. 1), time reached when you clicked (e.g. 0:05), and attempts left (from the page if detected, otherwise "N/A (check game)").
 - **Auto-click behaviour**: The script tries to read the leaderboard best time (closest to 00:00). It only clicks when the current timer is **at or below** that best time (so there’s a chance to beat it), and stops after `--max-clicks` (default 5) to avoid using all your attempts. Use `--best-time SEC` if the page structure doesn’t allow reading the leaderboard.

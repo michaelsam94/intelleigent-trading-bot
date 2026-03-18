@@ -44,7 +44,11 @@ TIMER_SELECTORS = [
 ]
 # Binance: digit elements inside TimeCounter (order: min1, min2, sec1, sec2) → "MM:SS"
 TIMER_DIGIT_CLASS = "[class*='TimeCounter_digitSet__num']"
+# Binance BTC Button: real game button is img or wrapper with BitcoinButton_bitcoinBtn in class
 BUTTON_SELECTORS = [
+    "img[class*='BitcoinButton_bitcoinBtn']",
+    "[class*='BitcoinButton_bitcoinBtn']",
+    "[class*='BitcoinButton']",
     "button[class*='button']",
     "[class*='click']",
     "button:not([disabled])",
@@ -290,6 +294,7 @@ def main():
     p.add_argument("--leaderboard-margin", type=int, default=0, metavar="SEC", help="Only click when timer <= best - SEC (default 0)")
     p.add_argument("--one-shot", action="store_true", help="One attempt per run: click once when conditions met, send email if env set, then exit")
     p.add_argument("--test-click", action="store_true", help="Find and click the button once then exit (uses 1 attempt; use to verify button works)")
+    p.add_argument("--test-find-button", action="store_true", help="Only find and report the button (no click, no attempt used); use if --test-click did not update Last Attempt")
     args = p.parse_args()
     if args.max_clicks is None:
         args.max_clicks = 1 if args.one_shot else 5
@@ -338,6 +343,7 @@ def main():
                         if btn and btn.is_visible():
                             btn.click()
                             print("  [OK] Button found and clicked (1 attempt used).")
+                            print("  (If Binance 'Last Attempt' did not update, we may have clicked the wrong element; try --test-find-button to see what we match.)")
                             clicked = True
                             break
                     except Exception as e:
@@ -349,6 +355,27 @@ def main():
             time.sleep(1)
             browser.close()
             return 0 if clicked else 1
+
+        if args.test_find_button:
+            print("  Test-find-button: listing what we would click (no click, no attempt used)...")
+            found_any = False
+            for i, frame in enumerate(page.frames):
+                for sel in BUTTON_SELECTORS:
+                    try:
+                        btn = frame.query_selector(sel)
+                        if btn and btn.is_visible():
+                            cls = btn.get_attribute("class") or ""
+                            tag = btn.evaluate("el => el.tagName").lower() if btn else ""
+                            print(f"  Would click: selector={sel!r} frame={i} tag={tag} class={cls[:80]!r}")
+                            found_any = True
+                    except Exception:
+                        continue
+            if not found_any:
+                print("  [FAIL] No button found. Check BUTTON_SELECTORS or page structure.")
+            else:
+                print("  ^ If the real game button has different class, add it to BUTTON_SELECTORS in the script.")
+            browser.close()
+            return 0 if found_any else 1
 
         last_notify_sec = -999
         last_timer_sec = None
