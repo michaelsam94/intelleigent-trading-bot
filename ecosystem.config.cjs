@@ -8,7 +8,10 @@
  *   export TELEGRAM_BOT_TOKEN="..."
  *   export TELEGRAM_CHAT_ID="..."
  *   export BINANCE_API_KEY="..." BINANCE_API_SECRET="..."  # if not in config
+ *   export BINANCE_BUTTON_SMTP_EMAIL="..." BINANCE_BUTTON_SMTP_PASSWORD="..." BINANCE_BUTTON_EMAIL_TO="..."  # for btc-game email
  *   pm2 start ecosystem.config.cjs
+ *
+ * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game
  */
 const path = require("path");
 const projectRoot = __dirname;
@@ -37,6 +40,20 @@ module.exports = {
       interpreter: "none",
       cwd: projectRoot,
       autorestart: true,
+      watch: false,
+      env,
+    },
+    {
+      name: "btc-game",
+      script: python,
+      args: [
+        "scripts/binance_btc_button_watch.py",
+        "-c", "data/binance_btc_button_cookies.json",
+        "--auto-click", "--best-time", "54", "--one-shot", "--headless",
+      ],
+      interpreter: "none",
+      cwd: projectRoot,
+      autorestart: false,
       watch: false,
       env,
     },
