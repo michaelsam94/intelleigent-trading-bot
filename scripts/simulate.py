@@ -64,7 +64,8 @@ def _prompt_int(prompt_text, default=None):
 @click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
 @click.option('--days', '-d', type=int, default=None, help='Use only the last N days of data for backtest (overrides simulate_model.data_days)')
 @click.option('--interactive', '-i', is_flag=True, help='Prompt for initial investment, leverage, and backtest days')
-def main(config_file, days, interactive):
+@click.option('--apply-best', is_flag=True, help='After simulation, update config with best thresholds (best gain %)')
+def main(config_file, days, interactive, apply_best):
     load_config(config_file)
     config = App.config
 
@@ -262,11 +263,15 @@ def main(config_file, days, interactive):
         ))
 
     #
-    # Flatten
+    # Flatten and sort by best gain: total_return_pct when available (balance run), else %profit/M
     #
+    def _best_gain_key(x):
+        p = x["performance"]
+        if p.get("total_return_pct") is not None:
+            return (p["total_return_pct"], p.get("%profit/M", 0))
+        return (p.get("%profit/M", 0), p.get("%profit", 0))
 
-    # Sort
-    performances = sorted(performances, key=lambda x: x['performance']['%profit/M'], reverse=True)
+    performances = sorted(performances, key=_best_gain_key, reverse=True)
     performances = performances[:topn_to_store]
 
     # Column names (from one record)
@@ -305,7 +310,7 @@ def main(config_file, days, interactive):
     if performances:
         best = performances[0]
         perf = best["performance"]
-        print("\n--- Best run (by %profit/M) ---")
+        print("\n--- Best run (by gain: total return % or %profit/M) ---")
         if perf.get("balance_after") is not None and starting_balance is not None:
             print(f"  End investment: ${perf['balance_after']:,.2f}  (start: ${starting_balance:,.2f})")
             print(f"  Total return: {perf.get('total_return_pct', 0):+.1f}%")
@@ -317,6 +322,17 @@ def main(config_file, days, interactive):
 
     elapsed = datetime.now() - now
     print(f"\nFinished simulation in {str(elapsed).split('.')[0]}")
+
+    if apply_best and performances:
+        import subprocess
+        import sys
+        print("\n--- Applying best parameters to config ---")
+        r = subprocess.call(
+            [sys.executable, "-m", "scripts.apply_best_simulation", "-c", config_file],
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        if r != 0:
+            print("WARNING: apply_best_simulation failed. Run: python -m scripts.apply_best_simulation -c <config>")
 
 
 if __name__ == '__main__':
