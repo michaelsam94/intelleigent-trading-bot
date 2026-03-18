@@ -73,10 +73,11 @@ Game: [BTC Button Jan 2026](https://www.binance.com/en/game/button/btc-button-Ja
 
    To get an email report after each click (attempt used, time reached, attempts left), set these **environment variables on the server** (do not commit them; add them manually where the script runs):
 
-   - `BINANCE_BUTTON_SMTP_EMAIL` — Gmail address (e.g. `yourname@gmail.com`)
+   - `BINANCE_BUTTON_SMTP_EMAIL` — Gmail address used to send (e.g. `yourname@gmail.com`)
    - `BINANCE_BUTTON_SMTP_PASSWORD` — Gmail App Password (not your normal password; create one in Google Account → Security → 2-Step Verification → App passwords)
+   - `BINANCE_BUTTON_EMAIL_TO` — (optional) Recipient address. If set, reports are sent to this address; if unset, they are sent to the SMTP email.
 
-   The script uses Gmail SMTP and sends to the same address. If either env var is missing, no email is sent.
+   If either `BINANCE_BUTTON_SMTP_EMAIL` or `BINANCE_BUTTON_SMTP_PASSWORD` is missing, no email is sent.
 
 4. **Ignore the file in Git**
 

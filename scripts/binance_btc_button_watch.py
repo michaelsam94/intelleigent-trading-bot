@@ -61,6 +61,7 @@ ATTEMPTS_LEFT_SELECTORS = [
 # Env vars for email (set on server; never commit credentials)
 ENV_SMTP_EMAIL = "BINANCE_BUTTON_SMTP_EMAIL"
 ENV_SMTP_PASSWORD = "BINANCE_BUTTON_SMTP_PASSWORD"
+ENV_EMAIL_TO = "BINANCE_BUTTON_EMAIL_TO"  # recipient; if unset, email is sent to SMTP address
 GMAIL_SMTP = ("smtp.gmail.com", 587)
 
 
@@ -192,8 +193,9 @@ def get_attempts_left(page) -> int | None:
 
 
 def send_attempt_email(
-    to_email: str,
+    from_email: str,
     smtp_password: str,
+    to_email: str,
     attempt_used: int,
     time_reached: str,
     attempts_left: int | None,
@@ -211,14 +213,15 @@ def send_attempt_email(
     ]
     body = "\n".join(body_lines)
     msg = MIMEMultipart()
-    msg["From"] = msg["To"] = to_email
+    msg["From"] = from_email
+    msg["To"] = to_email
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
     try:
         with smtplib.SMTP(*GMAIL_SMTP) as server:
             server.starttls()
-            server.login(to_email, smtp_password)
-            server.sendmail(to_email, [to_email], msg.as_string())
+            server.login(from_email, smtp_password)
+            server.sendmail(from_email, [to_email], msg.as_string())
         return True
     except Exception as e:
         print(f"\n  [Email failed: {e}]")
@@ -362,8 +365,9 @@ def main():
                                         attempts_left = get_attempts_left(page)
                                         smtp_email = os.environ.get(ENV_SMTP_EMAIL)
                                         smtp_password = os.environ.get(ENV_SMTP_PASSWORD)
+                                        email_to = os.environ.get(ENV_EMAIL_TO) or smtp_email
                                         if smtp_email and smtp_password:
-                                            if send_attempt_email(smtp_email, smtp_password, clicks_used, ts, attempts_left):
+                                            if send_attempt_email(smtp_email, smtp_password, email_to, clicks_used, ts, attempts_left):
                                                 print("  [Email sent.]")
                                         if args.one_shot:
                                             print("  [One-shot: exiting after one attempt.]")
