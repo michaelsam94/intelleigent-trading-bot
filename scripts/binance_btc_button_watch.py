@@ -71,11 +71,35 @@ def load_cookies(path: Path):
     with open(path) as f:
         data = json.load(f)
     if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and "cookies" in data:
-        return data["cookies"]
-    print("ERROR: Cookie file must be a JSON array of cookie objects or { \"cookies\": [...] }")
-    return None
+        raw = data
+    elif isinstance(data, dict) and "cookies" in data:
+        raw = data["cookies"]
+    else:
+        print("ERROR: Cookie file must be a JSON array of cookie objects or { \"cookies\": [...] }")
+        return None
+    return normalize_cookies_for_playwright(raw)
+
+
+def normalize_cookies_for_playwright(cookies: list[dict]) -> list[dict]:
+    """Playwright expects sameSite in (Strict|Lax|None). Browser exports often use other values."""
+    out = []
+    for c in cookies:
+        c = dict(c)
+        same = c.get("sameSite") or c.get("same_site")
+        if same is not None:
+            s = str(same).strip().lower()
+            if s == "strict":
+                c["sameSite"] = "Strict"
+            elif s == "lax":
+                c["sameSite"] = "Lax"
+            elif s in ("none", "no_restriction", "unspecified"):
+                c["sameSite"] = "None"
+            elif str(same) in ("Strict", "Lax", "None"):
+                c["sameSite"] = str(same)
+            else:
+                c["sameSite"] = "Lax"
+        out.append(c)
+    return out
 
 
 def parse_timer_text(text: str):

@@ -19,6 +19,15 @@ Game: [BTC Button Jan 2026](https://www.binance.com/en/game/button/btc-button-Ja
    pip install playwright
    playwright install chromium
    ```
+   **On Linux (e.g. Ubuntu server):** Chromium needs system libraries. Install them so headless mode works:
+   ```bash
+   playwright install-deps
+   ```
+   (Uses `sudo`.) If that fails, install manually, e.g.:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2
+   ```
 
 2. **Create a cookie file (never commit this)**
 
