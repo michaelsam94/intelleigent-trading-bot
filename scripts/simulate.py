@@ -301,8 +301,22 @@ def main(config_file, days, interactive):
 
     print(f"Simulation results stored in: {out_path}. Lines: {len(lines)}.")
 
+    # Print end investment and max drawdown for the best run (top of list)
+    if performances:
+        best = performances[0]
+        perf = best["performance"]
+        print("\n--- Best run (by %profit/M) ---")
+        if perf.get("balance_after") is not None and starting_balance is not None:
+            print(f"  End investment: ${perf['balance_after']:,.2f}  (start: ${starting_balance:,.2f})")
+            print(f"  Total return: {perf.get('total_return_pct', 0):+.1f}%")
+        else:
+            print(f"  Profit: ${perf.get('profit', 0):,.2f}  ({perf.get('%profit', 0):.1f}%)")
+        if perf.get("max_drawdown") is not None:
+            print(f"  Max drawdown: ${perf['max_drawdown']:,.2f}  ({perf.get('max_drawdown_pct', 0):.1f}%)")
+        print(f"  Params: {best['model']}")
+
     elapsed = datetime.now() - now
-    print(f"Finished simulation in {str(elapsed).split('.')[0]}")
+    print(f"\nFinished simulation in {str(elapsed).split('.')[0]}")
 
 
 if __name__ == '__main__':

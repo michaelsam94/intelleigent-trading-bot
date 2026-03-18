@@ -36,6 +36,7 @@ def simulated_trade_performance(
     lev = float(leverage)
     use_fees = fee_bps > 0 or lev != 1.0
     balance = float(starting_balance) if starting_balance is not None else None
+    balance_history = [balance] if balance is not None else None
 
     long_profit = 0
     long_profit_percent = 0
@@ -69,6 +70,7 @@ def simulated_trade_performance(
                     short_profitable += 1
                 if balance is not None and direction != "long":
                     balance = max(0.01, balance * (1.0 + net_margin / 100.0))
+                    balance_history.append(balance)
                 shorts.append((index, previous_price, price, profit, profit_percent))
                 is_buy_mode = False
         else:
@@ -85,6 +87,7 @@ def simulated_trade_performance(
                     long_profitable += 1
                 if balance is not None and direction != "short":
                     balance = max(0.01, balance * (1.0 + net_margin / 100.0))
+                    balance_history.append(balance)
                 longs.append((index, previous_price, price, profit, profit_percent))
                 is_buy_mode = True
 
@@ -127,7 +130,41 @@ def simulated_trade_performance(
         "%profit/T": round(profit_percent / transaction_no, 1) if transaction_no else 0.0,
     }
     if balance is not None and starting_balance and starting_balance > 0:
-        performance["balance_after"] = round(balance, 2)
-        performance["total_return_pct"] = round(100.0 * (balance - starting_balance) / starting_balance, 1)
+        balance_after = round(balance, 2)
+        total_return_pct = round(100.0 * (balance - starting_balance) / starting_balance, 1)
+        # Max drawdown: largest peak-to-trough drop in balance
+        if balance_history and len(balance_history) > 1:
+            peak = balance_history[0]
+            max_dd = 0.0
+            max_dd_pct = 0.0
+            for b in balance_history:
+                if b > peak:
+                    peak = b
+                dd = peak - b
+                dd_pct = 100.0 * dd / peak if peak > 0 else 0.0
+                if dd > max_dd:
+                    max_dd = dd
+                if dd_pct > max_dd_pct:
+                    max_dd_pct = dd_pct
+            max_drawdown = round(max_dd, 2)
+            max_drawdown_pct = round(max_dd_pct, 1)
+        else:
+            max_drawdown = 0.0
+            max_drawdown_pct = 0.0
+        performance["balance_after"] = balance_after
+        performance["total_return_pct"] = total_return_pct
+        performance["max_drawdown"] = max_drawdown
+        performance["max_drawdown_pct"] = max_drawdown_pct
+        # When only one side updates balance, attach to that side's dict for simulate direction=long/short
+        if direction == "long":
+            long_performance["balance_after"] = balance_after
+            long_performance["total_return_pct"] = total_return_pct
+            long_performance["max_drawdown"] = max_drawdown
+            long_performance["max_drawdown_pct"] = max_drawdown_pct
+        elif direction == "short":
+            short_performance["balance_after"] = balance_after
+            short_performance["total_return_pct"] = total_return_pct
+            short_performance["max_drawdown"] = max_drawdown
+            short_performance["max_drawdown_pct"] = max_drawdown_pct
 
     return performance, long_performance, short_performance
