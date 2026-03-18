@@ -316,9 +316,20 @@ def main():
         page.wait_for_load_state("networkidle", timeout=15000)
         time.sleep(3)  # let game iframe and dynamic content load
 
+        # One-time parse of leaderboard so user can see if it works (with or without --best-time)
+        parsed_best: int | None = None
+        for frame in page.frames:
+            b = get_leaderboard_best_sec(frame)
+            if b is not None:
+                parsed_best = b if parsed_best is None else min(parsed_best, b)
+        if parsed_best is not None:
+            print(f"  Leaderboard best (parsed from page): {parsed_best}s")
+        else:
+            print("  Leaderboard best: could not parse from page (use --best-time SEC to set threshold)")
+
         last_notify_sec = -999
         last_timer_sec = None
-        leaderboard_best_sec: int | None = None
+        leaderboard_best_sec: int | None = parsed_best  # use parsed value when no --best-time override
         LEADERBOARD_REFRESH_INTERVAL = 30.0
         last_leaderboard_refresh = -LEADERBOARD_REFRESH_INTERVAL  # refresh on first loop
         last_status_log = 0.0
