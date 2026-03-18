@@ -289,6 +289,7 @@ def main():
     p.add_argument("--max-clicks", type=int, default=None, metavar="N", help="Max auto-clicks per run (default 1 if --one-shot else 5)")
     p.add_argument("--leaderboard-margin", type=int, default=0, metavar="SEC", help="Only click when timer <= best - SEC (default 0)")
     p.add_argument("--one-shot", action="store_true", help="One attempt per run: click once when conditions met, send email if env set, then exit")
+    p.add_argument("--test-click", action="store_true", help="Find and click the button once then exit (uses 1 attempt; use to verify button works)")
     args = p.parse_args()
     if args.max_clicks is None:
         args.max_clicks = 1 if args.one_shot else 5
@@ -326,6 +327,28 @@ def main():
             print(f"  Leaderboard best (parsed from page): {parsed_best}s")
         else:
             print("  Leaderboard best: could not parse from page (use --best-time SEC to set threshold)")
+
+        if args.test_click:
+            print("  Test-click: looking for button to click once...")
+            clicked = False
+            for frame in page.frames:
+                for sel in BUTTON_SELECTORS:
+                    try:
+                        btn = frame.query_selector(sel)
+                        if btn and btn.is_visible():
+                            btn.click()
+                            print("  [OK] Button found and clicked (1 attempt used).")
+                            clicked = True
+                            break
+                    except Exception as e:
+                        continue
+                if clicked:
+                    break
+            if not clicked:
+                print("  [FAIL] Could not find or click the button. Check BUTTON_SELECTORS or page structure.")
+            time.sleep(1)
+            browser.close()
+            return 0 if clicked else 1
 
         last_notify_sec = -999
         last_timer_sec = None

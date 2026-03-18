@@ -115,9 +115,13 @@ python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.js
 
 # One attempt per run: click once when timer is below best, send email if env set, then exit (good for cron)
 python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json --auto-click --best-time 8 --one-shot --headless
+
+# Test that the button can be found and clicked (uses 1 attempt, then exits)
+python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json --test-click --headless
 ```
 
 - **Ctrl+C** stops the script.
+- **Test click**: Use `--test-click` to open the page, find the game button, click it once, and exit. Prints `[OK] Button found and clicked` or `[FAIL] Could not find or click the button`. **Uses one attempt** if the click succeeds.
 - **One-shot**: Use `--one-shot` so the script makes **one** attempt (one click when conditions are met), sends the email report if SMTP env vars are set, then exits. This avoids using multiple attempts in one run; schedule the script (e.g. with cron) to run periodically.
 - **Email body** contains: attempt used (e.g. 1), time reached when you clicked (e.g. 0:05), and attempts left (from the page if detected, otherwise "N/A (check game)").
 - **Auto-click behaviour**: The script tries to read the leaderboard best time (closest to 00:00). It only clicks when the current timer is **at or below** that best time (so there’s a chance to beat it), and stops after `--max-clicks` (default 5) to avoid using all your attempts. Use `--best-time SEC` if the page structure doesn’t allow reading the leaderboard.
