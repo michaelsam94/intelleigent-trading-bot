@@ -31,15 +31,19 @@ if str(_PROJECT_ROOT) not in sys.path:
 GAME_URL = "https://www.binance.com/en/game/button/btc-button-Jan2026"
 POLL_INTERVAL_SEC = 1.0
 # Selectors to try for timer (update if page structure differs; game may be in iframe)
+# Binance BTC Button uses TimeCounter with digits in separate elements (TimeCounter_digitSet__num__ArgPy)
 TIMER_SELECTORS = [
+    "[class*='TimeCounter_timeCounter']",  # Binance: container with MM:SS as separate digits
     "[class*='timer']",
     "[class*='countdown']",
     "[class*='Timer']",
     "[data-timer]",
     "div[class*='Timer']",
     ".css-timer",
-    "[class*='time']",  # Binance may use hashed classes like css-xxx
+    "[class*='time']",
 ]
+# Binance: digit elements inside TimeCounter (order: min1, min2, sec1, sec2) → "MM:SS"
+TIMER_DIGIT_CLASS = "[class*='TimeCounter_digitSet__num']"
 BUTTON_SELECTORS = [
     "button[class*='button']",
     "[class*='click']",
@@ -108,6 +112,25 @@ def normalize_cookies_for_playwright(cookies: list[dict]) -> list[dict]:
 
 def get_timer_from_frame(frame):
     """Try to read timer from a page frame (main or iframe). Returns (timer_sec, frame) or (None, None)."""
+    # Binance BTC Button: timer is TimeCounter with 4 digit elements (min1, min2, sec1, sec2)
+    try:
+        container = frame.query_selector("[class*='TimeCounter_timeCounter']")
+        if container:
+            digits_el = container.query_selector_all(TIMER_DIGIT_CLASS)
+            if len(digits_el) >= 4:
+                parts = []
+                for el in digits_el[:4]:
+                    t = el.inner_text().strip()
+                    if t and t[0].isdigit():
+                        parts.append(t[0])
+                if len(parts) == 4:
+                    mm_ss = f"{parts[0]}{parts[1]}:{parts[2]}{parts[3]}"
+                    sec = parse_timer_text(mm_ss)
+                    if sec is not None:
+                        return sec, frame
+    except Exception:
+        pass
+
     for sel in TIMER_SELECTORS:
         try:
             el = frame.query_selector(sel)
