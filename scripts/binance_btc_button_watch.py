@@ -10,11 +10,16 @@ Usage:
   # Create data/binance_btc_button_cookies.json with your cookies (see docs)
   python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json [--notify-under 15] [--headless]
 """
+import os
+import re
 import sys
+import smtplib
 import time
 import argparse
 import json
 from pathlib import Path
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Project root on path
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -45,6 +50,17 @@ LEADERBOARD_SELECTORS = [
     "table tr",
     "[class*='score']",
 ]
+# Attempts left: look for "X attempts" or "remaining X" on page
+ATTEMPTS_LEFT_SELECTORS = [
+    "[class*='attempt']",
+    "[class*='remaining']",
+    "[class*='chance']",
+]
+
+# Env vars for email (set on server; never commit credentials)
+ENV_SMTP_EMAIL = "BINANCE_BUTTON_SMTP_EMAIL"
+ENV_SMTP_PASSWORD = "BINANCE_BUTTON_SMTP_PASSWORD"
+GMAIL_SMTP = ("smtp.gmail.com", 587)
 
 
 def load_cookies(path: Path):
@@ -84,7 +100,6 @@ def get_leaderboard_best_sec(page) -> int | None:
     Try to read the leaderboard and return the best time in seconds (closest to 00:00 = smallest).
     Used to only auto-click when current timer is below this (so we can beat the record).
     """
-    import re
     candidates: list[int] = []
     # Try structured leaderboard rows first
     for sel in LEADERBOARD_SELECTORS:
@@ -117,6 +132,74 @@ def get_leaderboard_best_sec(page) -> int | None:
     return min(candidates) if candidates else None
 
 
+def get_attempts_left(page) -> int | None:
+    """Try to read remaining attempts from the page. Returns None if not found."""
+    for sel in ATTEMPTS_LEFT_SELECTORS:
+        try:
+            els = page.query_selector_all(sel)
+            for el in els[:5]:
+                try:
+                    t = el.inner_text()
+                    # e.g. "46 attempts left", "attempts: 47", "5/47"
+                    m = re.search(r"(\d+)\s*(?:attempts?|left|remaining|/|:)", t, re.I)
+                    if m:
+                        return int(m.group(1))
+                    m = re.search(r"(?:attempts?|left)\s*[:\s]*(\d+)", t, re.I)
+                    if m:
+                        return int(m.group(1))
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    try:
+        body = page.query_selector("body")
+        if body:
+            text = body.inner_text()
+            m = re.search(r"(\d+)\s*/\s*(\d+)\s*(?:attempt|click)", text, re.I)
+            if m:
+                return int(m.group(2)) - int(m.group(1))  # remaining = total - used
+            m = re.search(r"(?:attempts?|left)\s*[:\s]*(\d+)", text, re.I)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def send_attempt_email(
+    to_email: str,
+    smtp_password: str,
+    attempt_used: int,
+    time_reached: str,
+    attempts_left: int | None,
+) -> bool:
+    """Send a single attempt report via Gmail SMTP. Returns True on success."""
+    subject = f"Binance BTC Button — attempt #{attempt_used} at {time_reached}"
+    body_lines = [
+        "BTC Button attempt report",
+        "",
+        f"Attempt used: {attempt_used}",
+        f"Time reached when clicked: {time_reached}",
+        f"Attempts left: {attempts_left if attempts_left is not None else 'N/A (check game)'}",
+        "",
+        "— binance_btc_button_watch.py",
+    ]
+    body = "\n".join(body_lines)
+    msg = MIMEMultipart()
+    msg["From"] = msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+    try:
+        with smtplib.SMTP(*GMAIL_SMTP) as server:
+            server.starttls()
+            server.login(to_email, smtp_password)
+            server.sendmail(to_email, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        print(f"\n  [Email failed: {e}]")
+        return False
+
+
 def main():
     p = argparse.ArgumentParser(description="Watch Binance BTC Button game timer.")
     p.add_argument("-c", "--cookies", required=True, type=Path, help="Path to JSON cookie file")
@@ -124,9 +207,12 @@ def main():
     p.add_argument("--headless", action="store_true", help="Run browser headless")
     p.add_argument("--auto-click", action="store_true", help="Click only when timer is below leaderboard best (and within --max-clicks)")
     p.add_argument("--best-time", type=int, default=None, metavar="SEC", help="Override leaderboard best time in seconds (e.g. 8) if page parsing fails")
-    p.add_argument("--max-clicks", type=int, default=5, metavar="N", help="Max auto-clicks per run to preserve attempts (default 5)")
+    p.add_argument("--max-clicks", type=int, default=None, metavar="N", help="Max auto-clicks per run (default 1 if --one-shot else 5)")
     p.add_argument("--leaderboard-margin", type=int, default=0, metavar="SEC", help="Only click when timer <= best - SEC (default 0)")
+    p.add_argument("--one-shot", action="store_true", help="One attempt per run: click once when conditions met, send email if env set, then exit")
     args = p.parse_args()
+    if args.max_clicks is None:
+        args.max_clicks = 1 if args.one_shot else 5
 
     cookies = load_cookies(args.cookies.resolve())
     if not cookies:
@@ -159,6 +245,10 @@ def main():
         print("Watching timer (Ctrl+C to stop)...")
         if args.auto_click:
             print(f"  Auto-click: only when timer <= leaderboard best (minus margin), max {args.max_clicks} clicks this run.")
+            if args.one_shot:
+                print("  One-shot: will exit after first click.")
+            if os.environ.get(ENV_SMTP_EMAIL) and os.environ.get(ENV_SMTP_PASSWORD):
+                print("  Email: will send attempt report after each click (env set).")
             if args.best_time is not None:
                 leaderboard_best_sec = args.best_time
                 print(f"  Using --best-time override: {args.best_time}s")
@@ -230,6 +320,18 @@ def main():
                                         clicks_used += 1
                                         print(f"\n  [Auto-clicked at {ts} (below best {effective_best}s) — {clicks_used}/{args.max_clicks} clicks used]")
                                         last_notify_sec = -999
+                                        # Email report (env only; no credentials in repo)
+                                        time.sleep(2.0)
+                                        attempts_left = get_attempts_left(page)
+                                        smtp_email = os.environ.get(ENV_SMTP_EMAIL)
+                                        smtp_password = os.environ.get(ENV_SMTP_PASSWORD)
+                                        if smtp_email and smtp_password:
+                                            if send_attempt_email(smtp_email, smtp_password, clicks_used, ts, attempts_left):
+                                                print("  [Email sent.]")
+                                        if args.one_shot:
+                                            print("  [One-shot: exiting after one attempt.]")
+                                            browser.close()
+                                            return 0
                                         break
                                 except Exception:
                                     continue

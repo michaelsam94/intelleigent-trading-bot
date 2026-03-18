@@ -9,6 +9,8 @@ Game: [BTC Button Jan 2026](https://www.binance.com/en/game/button/btc-button-Ja
 - Watches the **60:00 → 00:00** countdown.
 - **Prints** the current timer and **alerts** (beep + message) when the timer is under a set number of seconds (default 15) so you can click manually.
 - Optional **auto-click** only when the timer is **below the current best score on the leaderboard** (so you only use attempts when you can beat the record), with a cap on clicks per run so you don’t run out of attempts (use `--auto-click`, `--max-clicks`, and optionally `--best-time`; use at your own risk and check Binance terms).
+- **One attempt per run** with `--one-shot`: makes a single click when conditions are met, then exits (no continuous attempts).
+- **Email after each attempt** (optional): if you set Gmail SMTP credentials in **environment variables on the server** (never in the repo), the script sends one email per click with: attempt used, time reached when clicked, and attempts left (if the page shows it).
 
 ## Setup
 
@@ -58,7 +60,16 @@ Game: [BTC Button Jan 2026](https://www.binance.com/en/game/button/btc-button-Ja
 
    Save as `data/binance_btc_button_cookies.json` (or another path and pass it with `-c`).
 
-3. **Ignore the file in Git**
+3. **Email after each attempt (optional, server only)**
+
+   To get an email report after each click (attempt used, time reached, attempts left), set these **environment variables on the server** (do not commit them; add them manually where the script runs):
+
+   - `BINANCE_BUTTON_SMTP_EMAIL` — Gmail address (e.g. `yourname@gmail.com`)
+   - `BINANCE_BUTTON_SMTP_PASSWORD` — Gmail App Password (not your normal password; create one in Google Account → Security → 2-Step Verification → App passwords)
+
+   The script uses Gmail SMTP and sends to the same address. If either env var is missing, no email is sent.
+
+4. **Ignore the file in Git**
 
    The repo already ignores `data/` or you can add:
 
@@ -91,9 +102,14 @@ python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.js
 
 # Only click when you're at least 2 seconds better than current best (--leaderboard-margin 2)
 python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json --auto-click --best-time 8 --leaderboard-margin 2 --max-clicks 5
+
+# One attempt per run: click once when timer is below best, send email if env set, then exit (good for cron)
+python scripts/binance_btc_button_watch.py -c data/binance_btc_button_cookies.json --auto-click --best-time 8 --one-shot --headless
 ```
 
 - **Ctrl+C** stops the script.
+- **One-shot**: Use `--one-shot` so the script makes **one** attempt (one click when conditions are met), sends the email report if SMTP env vars are set, then exits. This avoids using multiple attempts in one run; schedule the script (e.g. with cron) to run periodically.
+- **Email body** contains: attempt used (e.g. 1), time reached when you clicked (e.g. 0:05), and attempts left (from the page if detected, otherwise "N/A (check game)").
 - **Auto-click behaviour**: The script tries to read the leaderboard best time (closest to 00:00). It only clicks when the current timer is **at or below** that best time (so there’s a chance to beat it), and stops after `--max-clicks` (default 5) to avoid using all your attempts. Use `--best-time SEC` if the page structure doesn’t allow reading the leaderboard.
 - If the timer is not detected, the page layout may have changed; you may need to update the selectors in the script (see `TIMER_SELECTORS` in the script).
 
