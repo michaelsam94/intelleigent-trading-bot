@@ -33,10 +33,38 @@ responsible for generation of trade signals. It then measures performance.
 """
 
 
+def _prompt_float(prompt_text, default=None):
+    """Prompt for a float; use default if user presses Enter."""
+    while True:
+        s = input(prompt_text).strip()
+        if not s and default is not None:
+            return float(default)
+        if not s:
+            continue
+        try:
+            return float(s)
+        except ValueError:
+            print("  Enter a number.")
+
+def _prompt_int(prompt_text, default=None):
+    """Prompt for an int; use default if user presses Enter."""
+    while True:
+        s = input(prompt_text).strip()
+        if not s and default is not None:
+            return int(default)
+        if not s:
+            continue
+        try:
+            return int(s)
+        except ValueError:
+            print("  Enter a whole number.")
+
+
 @click.command()
 @click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
 @click.option('--days', '-d', type=int, default=None, help='Use only the last N days of data for backtest (overrides simulate_model.data_days)')
-def main(config_file, days):
+@click.option('--interactive', '-i', is_flag=True, help='Prompt for initial investment, leverage, and backtest days')
+def main(config_file, days, interactive):
     load_config(config_file)
     config = App.config
 
@@ -49,6 +77,26 @@ def main(config_file, days):
 
     symbol = config["symbol"]
     data_path = Path(config["data_folder"]) / symbol
+
+    # Resolve defaults for interactive prompts (from simulate_model or trader_simulation)
+    sim_cfg = config.get("simulate_model", {})
+    _days_default = days if days is not None else sim_cfg.get("data_days")
+    _lev = sim_cfg.get("leverage") or next(
+        (o["config"].get("leverage") for o in config.get("output_sets", []) if o.get("generator") == "trader_simulation" and isinstance(o.get("config"), dict)),
+        None
+    )
+    _bal = sim_cfg.get("starting_balance") or next(
+        (o["config"].get("starting_balance") for o in config.get("output_sets", []) if o.get("generator") == "trader_simulation" and isinstance(o.get("config"), dict)),
+        None
+    )
+
+    if interactive:
+        print("\n--- Backtest parameters ---")
+        _sb = _prompt_float("Initial investment (USD): ", _bal)
+        _lev_p = _prompt_float("Leverage: ", _lev)
+        days = _prompt_int("Number of backtest days: ", _days_default if _days_default is not None else 14)
+        config["_simulate_interactive"] = {"starting_balance": _sb, "leverage": _lev_p, "data_days": days}
+        print(f"  Using: balance=${_sb}, leverage={_lev_p}, days={days}\n")
 
     #
     # Load data with (rolling) label point-wise predictions and signals generated
@@ -73,10 +121,13 @@ def main(config_file, days):
     # Limit the source data
     #
     simulate_config = config["simulate_model"]
+    interactive_overrides = config.pop("_simulate_interactive", None)
 
     data_start = simulate_config.get("data_start", None)
     data_end = simulate_config.get("data_end", None)
     data_days = days if days is not None else simulate_config.get("data_days", None)
+    if interactive_overrides and "data_days" in interactive_overrides:
+        data_days = interactive_overrides["data_days"]
 
     if data_start:
         if isinstance(data_start, str):
@@ -135,6 +186,11 @@ def main(config_file, days):
             fee_bps_per_side = fee_bps_per_side if fee_bps_per_side is not None else trader_out["config"].get("fee_bps_per_side")
             leverage = leverage if leverage is not None else trader_out["config"].get("leverage")
             starting_balance = starting_balance if starting_balance is not None else trader_out["config"].get("starting_balance")
+    if interactive_overrides:
+        if "leverage" in interactive_overrides:
+            leverage = interactive_overrides["leverage"]
+        if "starting_balance" in interactive_overrides:
+            starting_balance = interactive_overrides["starting_balance"]
     fee_bps_per_side = float(fee_bps_per_side) if fee_bps_per_side is not None else 0
     leverage = float(leverage) if leverage is not None else 1.0
     starting_balance = float(starting_balance) if starting_balance is not None else None
