@@ -110,7 +110,7 @@ Documentation for each field in `configs/config-1min-realtime.jsonc`.
 | `signal_sets[].generator` | string | `"combine"`, `"meta"`, or `"threshold_rule"`. |
 | `"combine"` config | | `columns`, `names`, `combine`: `"mean"` or `"difference"`. Builds e.g. `high_score` / `low_score` from base algo columns. |
 | `"meta"` config | | `columns`: 6 base columns (high_20_05_lc/gb/xgb, low_20_05_lc/gb/xgb), `name`: `"trade_score"`. **Meta-learner** (Ridge) combines the 6 inputs into a single `trade_score`; use this as the final combiner instead of a crude difference. |
-| `"threshold_rule"` config | | `columns`: `"trade_score"`, `parameters.buy_signal_threshold`: `0.015`, `parameters.sell_signal_threshold`: `-0.015`. Optional `consecutive_bars`: require this many consecutive bars above/below threshold before opening (e.g. `2` reduces false entries). |
+| `"threshold_rule"` config | | `columns`: `"trade_score"`, `parameters.buy_signal_threshold`: `0.015`, `parameters.sell_signal_threshold`: `-0.015`. `consecutive_bars`: bars required for BUY (e.g. `2`). Optional `sell_consecutive_bars`: bars required for SELL (default same as `consecutive_bars`); set to `1` so one SELL ZONE bar can open SHORT when the model is rarely negative (e.g. trained in uptrend). |
 
 ---
 

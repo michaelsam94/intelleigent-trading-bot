@@ -70,7 +70,7 @@
         {"generator": "combine", "config": {"columns": ["high_20_05_lc", "high_20_05_gb", "high_20_05_xgb"], "names": "high_score", "combine": "mean", "coefficient": 1.0, "constant": 0.0}},
         {"generator": "combine", "config": {"columns": ["low_20_05_lc", "low_20_05_gb", "low_20_05_xgb"], "names": "low_score", "combine": "mean", "coefficient": 1.0, "constant": 0.0}},
         {"generator": "meta", "config": {"columns": ["high_20_05_lc", "high_20_05_gb", "high_20_05_xgb", "low_20_05_lc", "low_20_05_gb", "low_20_05_xgb"], "name": "trade_score"}},
-        {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "consecutive_bars": 2, "parameters": {"buy_signal_threshold": 0.015, "sell_signal_threshold": -0.015}}}
+        {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "consecutive_bars": 2, "sell_consecutive_bars": 1, "parameters": {"buy_signal_threshold": 0.015, "sell_signal_threshold": -0.015}}}
     ],
 
     "output_sets": [

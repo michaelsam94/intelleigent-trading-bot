@@ -206,6 +206,13 @@ def generate_threshold_rule(df, config):
     consecutive_bars = int(config.get("consecutive_bars", 1))
     if consecutive_bars < 1:
         consecutive_bars = 1
+    sell_consecutive_bars = config.get("sell_consecutive_bars")
+    if sell_consecutive_bars is not None:
+        sell_consecutive_bars = int(sell_consecutive_bars)
+        if sell_consecutive_bars < 1:
+            sell_consecutive_bars = 1
+    else:
+        sell_consecutive_bars = consecutive_bars
 
     buy_thresh = parameters.get("buy_signal_threshold")
     sell_thresh = parameters.get("sell_signal_threshold")
@@ -225,7 +232,8 @@ def generate_threshold_rule(df, config):
 
     if consecutive_bars > 1:
         buy_raw = buy_raw.rolling(consecutive_bars, min_periods=consecutive_bars).min().fillna(0).astype(bool)
-        sell_raw = sell_raw.rolling(consecutive_bars, min_periods=consecutive_bars).min().fillna(0).astype(bool)
+    if sell_consecutive_bars > 1:
+        sell_raw = sell_raw.rolling(sell_consecutive_bars, min_periods=sell_consecutive_bars).min().fillna(0).astype(bool)
 
     df[buy_signal_column] = buy_raw
     df[sell_signal_column] = sell_raw
