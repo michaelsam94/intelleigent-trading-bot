@@ -261,3 +261,7 @@ configs/config.json
 
 /MODELS/
 /DATA/
+
+# Binance game watcher – never commit cookies
+binance_btc_button_cookies.json
+binance_*_cookies.json
