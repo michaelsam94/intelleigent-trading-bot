@@ -17,7 +17,7 @@ import smtplib
 import time
 import argparse
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -30,13 +30,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 GAME_URL = "https://www.binance.com/en/game/button/btc-button-Jan2026"
 POLL_INTERVAL_SEC = 1.0
-# Selectors to try for timer (update if page structure differs)
+# Selectors to try for timer (update if page structure differs; game may be in iframe)
 TIMER_SELECTORS = [
     "[class*='timer']",
     "[class*='countdown']",
+    "[class*='Timer']",
     "[data-timer]",
     "div[class*='Timer']",
     ".css-timer",
+    "[class*='time']",  # Binance may use hashed classes like css-xxx
 ]
 BUTTON_SELECTORS = [
     "button[class*='button']",
@@ -102,6 +104,32 @@ def normalize_cookies_for_playwright(cookies: list[dict]) -> list[dict]:
                 c["sameSite"] = "Lax"
         out.append(c)
     return out
+
+
+def get_timer_from_frame(frame):
+    """Try to read timer from a page frame (main or iframe). Returns (timer_sec, frame) or (None, None)."""
+    for sel in TIMER_SELECTORS:
+        try:
+            el = frame.query_selector(sel)
+            if el:
+                text = el.inner_text()
+                sec = parse_timer_text(text)
+                if sec is not None:
+                    return sec, frame
+        except Exception:
+            continue
+    try:
+        body = frame.query_selector("body")
+        if body:
+            text = body.inner_text()
+            m = re.search(r"(\d{1,2}):(\d{2})", text)
+            if m:
+                sec = int(m.group(1)) * 60 + int(m.group(2))
+                if 0 <= sec <= 60:
+                    return sec, frame
+    except Exception:
+        pass
+    return None, None
 
 
 def parse_timer_text(text: str):
@@ -263,6 +291,7 @@ def main():
         page = context.new_page()
         page.goto(GAME_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_load_state("networkidle", timeout=15000)
+        time.sleep(3)  # let game iframe and dynamic content load
 
         last_notify_sec = -999
         last_timer_sec = None
@@ -284,33 +313,19 @@ def main():
                 print(f"  Using --best-time override: {args.best_time}s")
 
         try:
+            game_frame = None  # iframe where timer was found; None = main page
             while True:
                 timer_sec = None
                 timer_el = None
-                for sel in TIMER_SELECTORS:
-                    try:
-                        el = page.query_selector(sel)
-                        if el:
-                            text = el.inner_text()
-                            timer_sec = parse_timer_text(text)
-                            if timer_sec is not None:
-                                timer_el = el
-                                break
-                    except Exception:
-                        continue
+                # Try main page then every frame (game is often in an iframe on Binance)
+                for frame in page.frames:
+                    sec, found_frame = get_timer_from_frame(frame)
+                    if sec is not None:
+                        timer_sec = sec
+                        game_frame = found_frame
+                        break
                 if timer_sec is None:
-                    # Fallback: try to find any text like 59:00 or 1:30
-                    body = page.query_selector("body")
-                    if body:
-                        text = body.inner_text()
-                        import re
-                        m = re.search(r"(\d{1,2}):(\d{2})", text)
-                        if m:
-                            timer_sec = int(m.group(1)) * 60 + int(m.group(2))
-                            if 0 <= timer_sec <= 60:
-                                pass
-                            else:
-                                timer_sec = None
+                    game_frame = None
 
                 if timer_sec is not None:
                     mm, ss = divmod(timer_sec, 60)
@@ -332,7 +347,7 @@ def main():
                     now = time.monotonic()
                     if args.auto_click and (now - last_leaderboard_refresh) >= LEADERBOARD_REFRESH_INTERVAL:
                         last_leaderboard_refresh = now
-                        fresh = get_leaderboard_best_sec(page)
+                        fresh = get_leaderboard_best_sec(game_frame or page)
                         if fresh is not None:
                             leaderboard_best_sec = fresh
                             print(f"\n  [Leaderboard best: {leaderboard_best_sec}s]")
@@ -342,9 +357,10 @@ def main():
                     if args.auto_click and timer_sec > 0 and clicks_used < args.max_clicks:
                         threshold = (effective_best - args.leaderboard_margin) if effective_best is not None else None
                         if threshold is not None and timer_sec <= threshold:
+                            target = game_frame if game_frame else page
                             for sel in BUTTON_SELECTORS:
                                 try:
-                                    btn = page.query_selector(sel)
+                                    btn = target.query_selector(sel)
                                     if btn and btn.is_visible():
                                         btn.click()
                                         clicks_used += 1
@@ -352,7 +368,7 @@ def main():
                                         last_notify_sec = -999
                                         # Email report (env only; no credentials in repo)
                                         time.sleep(2.0)
-                                        attempts_left = get_attempts_left(page)
+                                        attempts_left = get_attempts_left(game_frame or page)
                                         smtp_email = os.environ.get(ENV_SMTP_EMAIL)
                                         smtp_password = os.environ.get(ENV_SMTP_PASSWORD)
                                         email_to = os.environ.get(ENV_EMAIL_TO) or smtp_email
@@ -375,7 +391,7 @@ def main():
                     last_status_log = now_mono
                 if (now_mono - last_status_log) >= STATUS_LOG_INTERVAL:
                     last_status_log = now_mono
-                    stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     threshold = (leaderboard_best_sec if leaderboard_best_sec is not None else args.best_time) or "?"
                     if timer_sec is not None:
                         mm, ss = divmod(timer_sec, 60)
