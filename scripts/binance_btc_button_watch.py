@@ -17,6 +17,7 @@ import smtplib
 import time
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -265,6 +266,8 @@ def main():
         leaderboard_best_sec: int | None = None
         LEADERBOARD_REFRESH_INTERVAL = 30.0
         last_leaderboard_refresh = -LEADERBOARD_REFRESH_INTERVAL  # refresh on first loop
+        last_status_log = 0.0
+        STATUS_LOG_INTERVAL = 30.0  # log a timestamped line every 30s so logs/cron show progress
         clicks_used = 0
         print("Watching timer (Ctrl+C to stop)...")
         if args.auto_click:
@@ -312,6 +315,16 @@ def main():
                     if last_timer_sec != timer_sec:
                         print(f"\r  Timer: {ts} ({timer_sec}s)  ", end="", flush=True)
                         last_timer_sec = timer_sec
+
+                    # Periodic status line for logs (so cron/redirect show the script is alive and current timer)
+                    now_mono = time.monotonic()
+                    if last_status_log == 0.0:
+                        last_status_log = now_mono  # prime so first log is after STATUS_LOG_INTERVAL
+                    if (now_mono - last_status_log) >= STATUS_LOG_INTERVAL:
+                        last_status_log = now_mono
+                        stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                        threshold = (leaderboard_best_sec if leaderboard_best_sec is not None else args.best_time) or "?"
+                        print(f"\n  [{stamp} UTC] Timer: {ts} ({timer_sec}s) — waiting for ≤{threshold}s to click")
 
                     if timer_sec <= args.notify_under and timer_sec != last_notify_sec:
                         last_notify_sec = timer_sec
