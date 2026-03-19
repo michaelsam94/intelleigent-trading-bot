@@ -34,6 +34,16 @@ module.exports = {
       env,
     },
     {
+      name: "server-btcusdc-5min",
+      script: python,
+      args: ["-m", "service.server", "-c", "configs/config-5min-realtime.jsonc"],
+      interpreter: "none",
+      cwd: projectRoot,
+      autorestart: true,
+      watch: false,
+      env,
+    },
+    {
       name: "server-ethusdc",
       script: python,
       args: ["-m", "service.server", "-c", "configs/config-1min-realtime-ethusdc.jsonc"],
