@@ -120,11 +120,14 @@ def normalize_cookies_for_playwright(cookies: list[dict]) -> list[dict]:
 
 
 def get_timer_from_frame(frame):
-    """Try to read timer from a page frame (main or iframe). Returns (timer_sec, frame) or (None, None)."""
-    # Binance BTC Button: timer is TimeCounter with 4 digit elements (min1, min2, sec1, sec2)
+    """Try to read timer from a page frame (main or iframe). Returns (timer_sec, frame) or (None, None).
+    Prefers the click countdown (0–60s) over round/phase timers (e.g. 20:40) when multiple exist."""
+    candidates: list[int] = []
+
+    # Binance BTC Button: can have multiple TimeCounter (round timer + click countdown). Prefer <= 60s.
     try:
-        container = frame.query_selector("[class*='TimeCounter_timeCounter']")
-        if container:
+        containers = frame.query_selector_all("[class*='TimeCounter_timeCounter']")
+        for container in containers:
             digits_el = container.query_selector_all(TIMER_DIGIT_CLASS)
             if len(digits_el) >= 4:
                 parts = []
@@ -136,7 +139,7 @@ def get_timer_from_frame(frame):
                     mm_ss = f"{parts[0]}{parts[1]}:{parts[2]}{parts[3]}"
                     sec = parse_timer_text(mm_ss)
                     if sec is not None:
-                        return sec, frame
+                        candidates.append(sec)
     except Exception:
         pass
 
@@ -147,21 +150,26 @@ def get_timer_from_frame(frame):
                 text = el.inner_text()
                 sec = parse_timer_text(text)
                 if sec is not None:
-                    return sec, frame
+                    candidates.append(sec)
         except Exception:
             continue
     try:
         body = frame.query_selector("body")
         if body:
             text = body.inner_text()
-            m = re.search(r"(\d{1,2}):(\d{2})", text)
-            if m:
+            for m in re.finditer(r"(\d{1,2}):(\d{2})", text):
                 sec = int(m.group(1)) * 60 + int(m.group(2))
-                if 0 <= sec <= 60:
-                    return sec, frame
+                if 0 <= sec <= 3600:  # allow up to 60:00 for round timer
+                    candidates.append(sec)
     except Exception:
         pass
-    return None, None
+
+    if not candidates:
+        return None, None
+    # Prefer click countdown (0–60s); else use smallest (closest to 0)
+    in_range = [s for s in candidates if 0 <= s <= 60]
+    best = min(in_range) if in_range else min(candidates)
+    return best, frame
 
 
 def parse_timer_text(text: str):
@@ -433,14 +441,17 @@ def _run_btc_button_watch(args, cookies):
             while True:
                 timer_sec = None
                 timer_el = None
-                # Try main page then every frame (game is often in an iframe on Binance)
+                # Collect best timer across all frames (prefer click countdown 0–60s over round timer)
+                all_timers: list[tuple[int, object]] = []
                 for frame in page.frames:
                     sec, found_frame = get_timer_from_frame(frame)
                     if sec is not None:
-                        timer_sec = sec
-                        game_frame = found_frame
-                        break
-                if timer_sec is None:
+                        all_timers.append((sec, found_frame))
+                if all_timers:
+                    in_range = [(s, f) for s, f in all_timers if 0 <= s <= 60]
+                    best_pair = min(in_range, key=lambda x: x[0]) if in_range else min(all_timers, key=lambda x: x[0])
+                    timer_sec, game_frame = best_pair
+                else:
                     game_frame = None
 
                 if timer_sec is not None:
