@@ -310,6 +310,18 @@ def main():
         return 1
 
     print(f"Opening game page (headless={args.headless})...")
+    try:
+        return _run_btc_button_watch(args)
+    except Exception as e:
+        msg = str(e)
+        if "Connection closed" in msg or "Browser.close" in msg or "reading from the driver" in msg:
+            print(f"  [WARN] Browser shutdown (ignored): {e}", flush=True)
+            return 0
+        raise
+
+
+def _run_btc_button_watch(args):
+    """Inner run so we can catch Playwright shutdown errors from context manager exit."""
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=args.headless)
         browser_closed = False
