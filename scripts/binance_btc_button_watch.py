@@ -78,6 +78,9 @@ ENV_SMTP_EMAIL = "BINANCE_BUTTON_SMTP_EMAIL"
 ENV_SMTP_PASSWORD = "BINANCE_BUTTON_SMTP_PASSWORD"
 ENV_EMAIL_TO = "BINANCE_BUTTON_EMAIL_TO"  # recipient; if unset, email is sent to SMTP address
 GMAIL_SMTP = ("smtp.gmail.com", 587)
+# Telegram: notify when we attempt one click (same env as trading servers)
+ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+ENV_TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"
 
 
 def load_cookies(path: Path):
@@ -303,6 +306,28 @@ def send_attempt_email(
         return False
 
 
+def send_telegram_click_notification(time_reached: str, clicks_used: int, max_clicks: int, attempts_left: int | None) -> bool:
+    """Send a one-line Telegram message when we attempted one BTC button click. Returns True if sent."""
+    token = (os.environ.get(ENV_TELEGRAM_BOT_TOKEN) or "").strip()
+    chat_id = (os.environ.get(ENV_TELEGRAM_CHAT_ID) or "").strip()
+    if not token or not chat_id:
+        return False
+    text = (
+        f"🖱 *BTC Button* — clicked at {time_reached}\n"
+        f"Clicks this run: {clicks_used}/{max_clicks}\n"
+        f"Attempts left: {attempts_left if attempts_left is not None else 'N/A'}"
+    )
+    try:
+        import urllib.parse
+        import urllib.request
+        url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + chat_id + "&parse_mode=markdown&text=" + urllib.parse.quote(text)
+        with urllib.request.urlopen(url, timeout=10) as r:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 def main():
     p = argparse.ArgumentParser(description="Watch Binance BTC Button game timer.")
     p.add_argument("-c", "--cookies", required=True, type=Path, help="Path to JSON cookie file")
@@ -391,6 +416,10 @@ def _run_btc_button_watch(args, cookies):
                             btn.click()
                             print("  [OK] Button found and clicked (1 attempt used).")
                             print("  (If Binance 'Last Attempt' did not update, we may have clicked the wrong element; try --test-find-button to see what we match.)")
+                            time.sleep(2.0)
+                            attempts_left = get_attempts_left(frame)
+                            if send_telegram_click_notification("0:00", 1, 1, attempts_left):
+                                print("  [Telegram sent.]")
                             clicked = True
                             break
                     except Exception as e:
@@ -518,6 +547,8 @@ def _run_btc_button_watch(args, cookies):
                                             if smtp_email and smtp_password:
                                                 if send_attempt_email(smtp_email, smtp_password, email_to, clicks_used, ts, attempts_left):
                                                     print("  [Email sent.]")
+                                            if send_telegram_click_notification(ts, clicks_used, args.max_clicks, attempts_left):
+                                                print("  [Telegram sent.]")
                                             if args.one_shot:
                                                 print("  [One-shot: exiting after one attempt.]")
                                                 close_browser_safe()

@@ -11,6 +11,7 @@ Game: [BTC Button Jan 2026](https://www.binance.com/en/game/button/btc-button-Ja
 - Optional **auto-click** only when the timer is **below the current best score on the leaderboard** (so you only use attempts when you can beat the record), with a cap on clicks per run so you don’t run out of attempts (use `--auto-click`, `--max-clicks`, and optionally `--best-time`; use at your own risk and check Binance terms).
 - **One attempt per run** with `--one-shot`: makes a single click when conditions are met, then exits (no continuous attempts).
 - **Email after each attempt** (optional): if you set Gmail SMTP credentials in **environment variables on the server** (never in the repo), the script sends one email per click with: attempt used, time reached when clicked, and attempts left (if the page shows it).
+- **Telegram after each click** (optional): if you set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the environment (or in `.env` when using PM2), the script sends a short message to your Telegram when it attempts one click (time reached, clicks this run, attempts left).
 
 ## Setup
 
@@ -78,6 +79,12 @@ Game: [BTC Button Jan 2026](https://www.binance.com/en/game/button/btc-button-Ja
    - `BINANCE_BUTTON_EMAIL_TO` — (optional) Recipient address. If set, reports are sent to this address; if unset, they are sent to the SMTP email.
 
    If either `BINANCE_BUTTON_SMTP_EMAIL` or `BINANCE_BUTTON_SMTP_PASSWORD` is missing, no email is sent.
+
+   **Telegram (optional)**  
+   To get a Telegram message when the script clicks the BTC button once, set (e.g. in `.env` or before `pm2 start`):
+   - `TELEGRAM_BOT_TOKEN` — from [@BotFather](https://t.me/BotFather)
+   - `TELEGRAM_CHAT_ID` — your chat ID (e.g. from [@userinfobot](https://t.me/userinfobot))
+   If either is missing, no Telegram message is sent.
 
 4. **Ignore the file in Git**
 
