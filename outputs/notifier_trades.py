@@ -255,8 +255,15 @@ def _send_telegram(bot_token, chat_id, text):
 
 
 async def send_transaction_message(transaction, config):
-    bot_token = (config.get("telegram_bot_token") or "").strip()
-    chat_id = str(config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
+    # Prefer config values, but fall back to env vars so you can keep secrets out of repo.
+    bot_token = (
+        (config.get("telegram_bot_token") or "").strip()
+        or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    )
+    chat_id = (
+        str(config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
+        or os.environ.get("TELEGRAM_CHAT_ID", "").strip().replace("\n", "").replace("\r", "")
+    )
     if not bot_token or not chat_id:
         return
 
