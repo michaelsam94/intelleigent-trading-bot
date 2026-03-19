@@ -262,6 +262,9 @@ configs/config.json
 /MODELS/
 /DATA/
 
+# Generated / pipeline outputs (models, csvs, matrices, balances, etc.)
+data/
+
 # Binance game watcher – never commit cookies
 binance_btc_button_cookies.json
 binance_*_cookies.json
