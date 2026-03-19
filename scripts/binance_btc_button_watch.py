@@ -326,7 +326,9 @@ def main():
 def _run_btc_button_watch(args, cookies):
     """Inner run so we can catch Playwright shutdown errors from context manager exit."""
     with sync_playwright() as pw:
+        print("  Launching Chromium (can take 1–2 min on small instances)...", flush=True)
         browser = pw.chromium.launch(headless=args.headless)
+        print("  Browser ready, loading page...", flush=True)
         browser_closed = False
 
         def close_browser_safe():
@@ -349,6 +351,7 @@ def _run_btc_button_watch(args, cookies):
         page = context.new_page()
         # "commit" = earliest navigation event (avoids timeout on slow instances where domcontentloaded takes >90s)
         page.goto(GAME_URL, wait_until="commit", timeout=60000)
+        print("  Waiting for game to render (20s)...", flush=True)
         time.sleep(20)  # let DOM, iframe and game load without blocking on load events
 
         # One-time parse of leaderboard so user can see if it works (with or without --best-time)
