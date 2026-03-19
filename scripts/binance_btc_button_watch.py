@@ -347,8 +347,8 @@ def _run_btc_button_watch(args, cookies):
         )
         context.add_cookies(cookies)
         page = context.new_page()
-        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
+        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=90000)  # 90s for slow instances / heavy page
+        page.wait_for_load_state("load", timeout=30000)  # "networkidle" often never fires on Binance (ongoing requests)
         time.sleep(3)  # let game iframe and dynamic content load
 
         # One-time parse of leaderboard so user can see if it works (with or without --best-time)
