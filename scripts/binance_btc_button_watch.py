@@ -464,9 +464,9 @@ def _run_btc_button_watch(args, cookies):
                 if timer_sec is not None:
                     mm, ss = divmod(timer_sec, 60)
                     ts = f"{mm}:{ss:02d}"
-                    if last_timer_sec != timer_sec:
-                        print(f"\r  Timer: {ts} ({timer_sec}s)  ", end="", flush=True)
-                        last_timer_sec = timer_sec
+                    # Update display every poll (every second) so timer countdown is visible
+                    print(f"\r  Timer: {ts} ({timer_sec}s)  ", end="", flush=True)
+                    last_timer_sec = timer_sec
 
                     if timer_sec <= args.notify_under and timer_sec != last_notify_sec:
                         last_notify_sec = timer_sec
