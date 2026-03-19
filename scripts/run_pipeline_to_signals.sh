@@ -5,9 +5,8 @@
 #   ./scripts/run_pipeline_to_signals.sh <config.jsonc>      # run one config
 #   ./scripts/run_pipeline_to_signals.sh <config1> <config2> # run multiple configs
 #
-# Required: set "train": true in the config before running (step 5 trains lc, gb, xgb, meta).
-# After pipeline completes, set "train": false again for the server so it doesn't retrain on every run.
-# If you skip this, XGB and trade_score_meta models will be missing and the server will log "Cannot load model... Skip."
+# The script sets "train": true before each config's pipeline and restores "train": false on exit
+# (success or failure) for every config that was started, so the server does not stay in train mode.
 
 set -e
 
@@ -17,9 +16,50 @@ else
   CONFIGS=("$@")
 fi
 
+# --- train: true/false toggling (jsonc: first "train" key only) ---
+PIPELINE_MANAGED_CONFIGS=()
+
+_set_train_true() {
+  python - "$1" <<'PY'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+new = re.sub(r'"train"\s*:\s*false', '"train": true', text, count=1, flags=re.I)
+with open(path, "w") as f:
+    f.write(new)
+PY
+}
+
+_set_train_false() {
+  python - "$1" <<'PY'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+new = re.sub(r'"train"\s*:\s*true', '"train": false', text, count=1, flags=re.I)
+with open(path, "w") as f:
+    f.write(new)
+PY
+}
+
+_restore_train_false_all_managed() {
+  for c in "${PIPELINE_MANAGED_CONFIGS[@]}"; do
+    [ -f "$c" ] || continue
+    echo "  Restoring \"train\": false in $c"
+    _set_train_false "$c"
+  done
+}
+
+trap '_restore_train_false_all_managed' EXIT
+
 for CONFIG in "${CONFIGS[@]}"; do
   echo ""
   echo "=== Pipeline to signals (config: $CONFIG) ==="
+
+  echo "  Setting \"train\": true in $CONFIG (restored to false when this script exits)"
+  _set_train_true "$CONFIG"
+  PIPELINE_MANAGED_CONFIGS+=("$CONFIG")
 
   # Ensure data folder exists (download creates symbol subdir; merge needs data_folder)
   DATA_DIR=$(python -c "
@@ -46,15 +86,6 @@ print(json.loads(s).get('data_folder', './data'))
   python -m scripts.check_label_balance -c "$CONFIG" || exit 1
 
   echo "5/7 Train..."
-  TRAIN_MODE=$(python -c "
-import re, json, sys
-with open(sys.argv[1]) as f: s = re.sub(r'//.*', '', f.read())
-print(json.loads(s).get('train', False))
-" "$CONFIG")
-  if [ "$TRAIN_MODE" != "True" ]; then
-    echo "ERROR: Config has \"train\": false. Set \"train\": true in $CONFIG so step 5 trains all models (lc, gb, xgb, meta). Then set back to false for the server."
-    exit 1
-  fi
   python -m scripts.train -c "$CONFIG"
 
   echo "6/7 Predict..."
