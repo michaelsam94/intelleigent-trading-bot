@@ -11,6 +11,8 @@
 #   ./scripts/run_backtest_5min.sh 14           # backtest last 14 days for both
 #   ./scripts/run_backtest_5min.sh 14 --apply-best   # backtest then update configs with best thresholds
 #
+# Iterative train + backtest until target profit: python -m scripts.train_and_backtest_5min_until_optimum --max-iter 3 --target 0 --days 14
+#
 # Optional: add -i for interactive (prompt for balance, leverage, days).
 
 set -e

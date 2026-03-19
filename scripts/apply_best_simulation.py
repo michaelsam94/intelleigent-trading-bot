@@ -126,7 +126,7 @@ def main():
     new_text = new_search + rest if rest else new_search
 
     if new_text == text:
-        print("WARNING: No threshold_rule parameters found in config; nothing updated.")
+        print("WARNING: No change made (config already has these thresholds, or no threshold_rule params found).")
         print(f"  Config path: {config_path}")
         return 0
 
