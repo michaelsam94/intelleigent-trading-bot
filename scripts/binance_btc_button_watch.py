@@ -124,7 +124,7 @@ def get_timer_from_frame(frame):
     Prefers the click countdown (0–60s) over round/phase timers (e.g. 20:40) when multiple exist."""
     candidates: list[int] = []
 
-    # Binance BTC Button: can have multiple TimeCounter (round timer + click countdown). Prefer <= 60s.
+    # Binance BTC Button: TimeCounter has two digit groups (e.g. 5,9 | 7,4). Can be MM:SS or seconds-only.
     try:
         containers = frame.query_selector_all("[class*='TimeCounter_timeCounter']")
         for container in containers:
@@ -140,6 +140,13 @@ def get_timer_from_frame(frame):
                     sec = parse_timer_text(mm_ss)
                     if sec is not None:
                         candidates.append(sec)
+                    # Click countdown often shows as seconds only (e.g. 59); first two digits = seconds
+                    try:
+                        sec_only = int(parts[0] + parts[1])
+                        if 0 <= sec_only <= 60:
+                            candidates.append(sec_only)
+                    except ValueError:
+                        pass
     except Exception:
         pass
 
