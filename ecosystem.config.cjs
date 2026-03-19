@@ -4,22 +4,40 @@
  *
  * From project root. Uses venv Python if present: ./venv/bin/python
  *
- * Telegram/Binance: set env vars before starting so they are passed to the app:
- *   export TELEGRAM_BOT_TOKEN="..."
- *   export TELEGRAM_CHAT_ID="..."
- *   export BINANCE_API_KEY="..." BINANCE_API_SECRET="..."  # if not in config
- *   export BINANCE_BUTTON_SMTP_EMAIL="..." BINANCE_BUTTON_SMTP_PASSWORD="..." BINANCE_BUTTON_EMAIL_TO="..."  # for btc-game email
- *   pm2 start ecosystem.config.cjs
+ * Env: merge .env from project root (if present) so you can keep secrets out of the shell.
+ * Create .env with (do not commit):
+ *   TELEGRAM_BOT_TOKEN=...
+ *   TELEGRAM_CHAT_ID=...
+ *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
+ *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
+ * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
  *
  * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game
  */
 const path = require("path");
+const fs = require("fs");
 const projectRoot = __dirname;
 const venvPython = path.join(projectRoot, "venv", "bin", "python");
-const python = require("fs").existsSync(venvPython) ? venvPython : "python";
+const python = fs.existsSync(venvPython) ? venvPython : "python";
 
-// Pass through current env so TELEGRAM_* and BINANCE_* set before "pm2 start" reach the app
+// Start from current process env, then overlay .env from project root (if present)
 const env = { ...process.env };
+const envPath = path.join(projectRoot, ".env");
+if (fs.existsSync(envPath)) {
+  const buf = fs.readFileSync(envPath, "utf8");
+  buf.split("\n").forEach((line) => {
+    line = line.replace(/#.*/, "").trim();
+    if (!line) return;
+    const eq = line.indexOf("=");
+    if (eq > 0) {
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"');
+      if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1).replace(/\\'/g, "'");
+      env[key] = val;
+    }
+  });
+}
 
 module.exports = {
   apps: [
