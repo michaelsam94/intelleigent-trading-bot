@@ -243,6 +243,14 @@ async def generate_trader_transaction(df, model: dict, config: dict):
     }
 
 
+def _is_placeholder(val):
+    """Treat config placeholders as missing so we fall back to env vars."""
+    if not val or not isinstance(val, str):
+        return True
+    s = val.strip()
+    return "<" in s or ">" in s or s.lower().startswith("your-") or s == ""
+
+
 def _send_telegram(bot_token, chat_id, text):
     try:
         import urllib.parse
@@ -255,16 +263,18 @@ def _send_telegram(bot_token, chat_id, text):
 
 
 async def send_transaction_message(transaction, config):
-    # Prefer config values, but fall back to env vars so you can keep secrets out of repo.
-    bot_token = (
-        (config.get("telegram_bot_token") or "").strip()
-        or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    )
-    chat_id = (
-        str(config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
-        or os.environ.get("TELEGRAM_CHAT_ID", "").strip().replace("\n", "").replace("\r", "")
-    )
+    # Prefer config values, but treat placeholders as missing and fall back to env vars.
+    cfg_token = (config.get("telegram_bot_token") or "").strip()
+    cfg_chat = str(config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
+    bot_token = cfg_token if not _is_placeholder(cfg_token) else ""
+    bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = cfg_chat if not _is_placeholder(cfg_chat) else ""
+    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip().replace("\n", "").replace("\r", "")
     if not bot_token or not chat_id:
+        log.error(
+            "Telegram not sent: telegram_bot_token or telegram_chat_id is missing or still a placeholder. "
+            "Set real values in config or export TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before starting the server (e.g. before pm2 start)."
+        )
         return
 
     status = transaction.get("status")
