@@ -1,0 +1,143 @@
+{
+    "train": false,
+    "venue": "binance",
+    "api_key": "<your-binance-api-key>",
+    "api_secret": "<your-binance-api-secret>",
+    "telegram_bot_token": "<your-telegram-bot-token>",
+    "telegram_chat_id": "<your-telegram-chat-id>",
+    "data_folder": "./data",
+    "symbol": "ETHUSDC",
+    "description": "ETHUSDC 5min realtime, predict next 30-60 min",
+    "freq": "5min",
+    "use_websocket": true,
+
+    "label_horizon": 12,
+    "features_horizon": 240,
+    "train_length": 120000,
+    "predict_length": 288,
+    "append_overlap_records": 60,
+
+    "download_start_days": 120,
+    "data_sources": [
+        {"folder": "ETHUSDC", "file": "klines", "column_prefix": ""}
+    ],
+
+    "feature_sets": [
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["SMA", "EMA"], "windows": [3, 5, 10, 15, 30, 60]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["LINEARREG_SLOPE"], "windows": [5, 10, 15, 30, 60]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["RSI", "ROC", "MOM"], "windows": [5, 10, 14, 20]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["STDDEV"], "windows": [5, 10, 20, 60]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["high", "low", "close"], "functions": ["ATR"], "windows": [14, 20]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close", "volume"], "functions": ["OBV"], "windows": [0]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["high", "low", "close", "volume"], "functions": ["MFI"], "windows": [10, 20]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["MACD"], "windows": [0]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["high", "low", "close", "volume"], "functions": ["ADOSC"], "windows": [0]}},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {"columns": ["close"], "functions": ["BBANDS"], "windows": [20]}},
+        {"column_prefix": "", "generator": "resampled_talib", "feature_prefix": "", "config": {"rule": "5T", "prefix": "5m", "talib": {"columns": ["close"], "functions": ["RSI", "LINEARREG_SLOPE"], "windows": [14, 10]}}}
+    ],
+
+    "label_sets": [
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "high", "thresholds": [0.12, 0.2], "tolerance": 0.55, "horizon": 12, "names": ["high_20_03", "high_20_05"]}},
+        {"column_prefix": "", "generator": "highlow2", "feature_prefix": "", "config": {"columns": ["close", "high", "low"], "function": "low", "thresholds": [0.12, 0.2], "tolerance": 0.55, "horizon": 12, "names": ["low_20_03", "low_20_05"]}}
+    ],
+
+    "train_feature_sets": [{"generator": "train_features", "config": {}}],
+    "train_features": [
+        "close_SMA_3", "close_SMA_5", "close_SMA_10", "close_SMA_15", "close_SMA_30", "close_SMA_60",
+        "close_EMA_3", "close_EMA_5", "close_EMA_10", "close_EMA_15", "close_EMA_30", "close_EMA_60",
+        "close_LINEARREG_SLOPE_5", "close_LINEARREG_SLOPE_10", "close_LINEARREG_SLOPE_15", "close_LINEARREG_SLOPE_30", "close_LINEARREG_SLOPE_60",
+        "close_RSI_5", "close_RSI_10", "close_RSI_14", "close_RSI_20",
+        "close_ROC_5", "close_ROC_10", "close_ROC_14", "close_ROC_20",
+        "close_MOM_5", "close_MOM_10", "close_MOM_14", "close_MOM_20",
+        "close_STDDEV_5", "close_STDDEV_10", "close_STDDEV_20", "close_STDDEV_60",
+        "high_low_close_ATR_14", "high_low_close_ATR_20",
+        "close_volume_OBV",
+        "high_low_close_volume_MFI_10", "high_low_close_volume_MFI_20",
+        "close_MACD_0", "close_MACD_1", "close_MACD_2",
+        "high_low_close_volume_ADOSC",
+        "close_BBANDS_20_0", "close_BBANDS_20_1", "close_BBANDS_20_2",
+        "5m_close_RSI_14", "5m_close_LINEARREG_SLOPE_10"
+    ],
+    "labels": ["high_20_03", "high_20_05", "low_20_03", "low_20_05"],
+    "algorithms": [
+        {"name": "lc", "algo": "lc", "params": {"is_scale": true, "length": 0, "allow_constant_fallback": true}, "train": {"penalty": "l2", "C": 1.0, "class_weight": "balanced", "solver": "saga", "max_iter": 2000, "n_jobs": -1}},
+        {"name": "gb", "algo": "gb", "params": {"is_scale": true, "length": 0}, "train": {"objective": "binary", "is_unbalance": true, "max_depth": 6, "learning_rate": 0.02, "num_boost_round": 500, "early_stopping_rounds": 30, "num_leaves": 31, "n_jobs": -1, "lambda_l1": 0.1, "lambda_l2": 0.1}},
+        {"name": "xgb", "algo": "xgb", "params": {"is_scale": true, "length": 0}, "train": {"max_depth": 4, "learning_rate": 0.05, "n_estimators": 300, "early_stopping_rounds": 30, "reg_alpha": 0.1, "reg_lambda": 0.1, "subsample": 0.8, "colsample_bytree": 0.8, "tree_method": "hist", "max_bin": 256, "n_jobs": -1, "eval_metric": "logloss", "use_label_encoder": false}},
+        {"name": "meta", "algo": "meta", "params": {"score_column": "trade_score_meta", "base_columns": ["high_20_05_lc", "high_20_05_gb", "high_20_05_xgb", "low_20_05_lc", "low_20_05_gb", "low_20_05_xgb"]}}
+    ],
+
+    "signal_sets": [
+        {"generator": "combine", "config": {"columns": ["high_20_05_lc", "high_20_05_gb", "high_20_05_xgb"], "names": "high_score", "combine": "mean", "coefficient": 1.0, "constant": 0.0}},
+        {"generator": "combine", "config": {"columns": ["low_20_05_lc", "low_20_05_gb", "low_20_05_xgb"], "names": "low_score", "combine": "mean", "coefficient": 1.0, "constant": 0.0}},
+        {"generator": "meta", "config": {"columns": ["high_20_05_lc", "high_20_05_gb", "high_20_05_xgb", "low_20_05_lc", "low_20_05_gb", "low_20_05_xgb"], "name": "trade_score"}},
+        {"generator": "threshold_rule", "config": {"columns": "trade_score", "names": ["buy_signal_column", "sell_signal_column"], "consecutive_bars": 2, "sell_consecutive_bars": 1, "parameters": {"buy_signal_threshold": 0.03, "sell_signal_threshold": -0.03}}}
+    ],
+
+    "output_sets": [
+        {"generator": "score_notification_model", "config": {
+            "score_notification": true,
+            "notify_every_run": false,
+            "score_column_names": ["trade_score"],
+            "notify_band_up": true,
+            "notify_band_dn": true,
+            "positive_bands": [
+                {"edge": 0.03, "frequency": null, "sign": "〉〉〉📈", "bold": true, "text": "BUY ZONE"},
+                {"edge": 0.02, "frequency": null, "sign": "〉〉", "bold": false, "text": "strong"},
+                {"edge": 0.015, "frequency": null, "sign": "〉", "text": "weak"}
+            ],
+            "negative_bands": [
+                {"edge": -0.015, "frequency": null, "sign": "〈", "text": "weak"},
+                {"edge": -0.02, "frequency": null, "sign": "〈〈", "bold": false, "text": "strong"},
+                {"edge": -0.03, "frequency": null, "sign": "〈〈〈📉", "bold": true, "text": "SELL ZONE"}
+            ]
+        }},
+        {"generator": "trader_simulation", "config": {
+            "buy_signal_column": "buy_signal_column",
+            "sell_signal_column": "sell_signal_column",
+            "starting_balance": 10,
+            "leverage": 20,
+            "fee_bps_per_side": 4,
+            "reset_balance_on_restart": true,
+            "daily_drawdown_limit_pct": 90,
+            "min_bars_between_trades": 20,
+            "tp_sl": {
+                "atr_column": "high_low_close_ATR_14",
+                "tp_atr_mult": 4.0,
+                "sl_atr_mult": 2.5,
+                "trailing_stop_enabled": false,
+                "trailing_atr_mult": 2.0,
+                "tp_pct_fallback": 0.15,
+                "sl_pct_fallback": 0.1
+            }
+        }}
+    ],
+
+    "simulate_model": {
+        "data_start": 0,
+        "data_end": null,
+        "data_days": null,
+        "direction": "long",
+        "topn_to_store": 10,
+        "signal_generator": "threshold_rule",
+        "buy_sell_equal": false,
+        "fee_bps_per_side": 4,
+        "leverage": 20,
+        "starting_balance": 10,
+        "grid": {
+            "buy_signal_threshold": [0.03, 0.04, 0.05],
+            "sell_signal_threshold": [-0.03, -0.04, -0.05]
+        }
+    },
+
+    "matrix_file_name": "matrix.csv",
+    "prediction_metrics_file": "prediction-metrics.txt",
+    "rolling_predict": {
+        "data_start": null,
+        "data_end": null,
+        "prediction_start": null,
+        "prediction_size": 10080,
+        "prediction_steps": 4,
+        "use_multiprocessing": false,
+        "max_workers": 8
+    }
+}
