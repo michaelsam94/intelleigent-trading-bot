@@ -452,34 +452,48 @@ def main():
                     effective_best = leaderboard_best_sec if leaderboard_best_sec is not None else args.best_time
 
                     # Auto-click only when: below leaderboard best (minus margin), within attempt cap
-                    if args.auto_click and timer_sec > 0 and clicks_used < args.max_clicks:
+                    if args.auto_click and timer_sec >= 0 and clicks_used < args.max_clicks:
                         threshold = (effective_best - args.leaderboard_margin) if effective_best is not None else None
                         if threshold is not None and timer_sec <= threshold:
-                            target = game_frame if game_frame else page
-                            for sel in BUTTON_SELECTORS:
-                                try:
-                                    btn = target.query_selector(sel)
-                                    if btn and btn.is_visible():
-                                        btn.click()
-                                        clicks_used += 1
-                                        print(f"\n  [Auto-clicked at {ts} (below best {effective_best}s) — {clicks_used}/{args.max_clicks} clicks used]")
-                                        last_notify_sec = -999
-                                        # Email report (env only; no credentials in repo)
-                                        time.sleep(2.0)
-                                        attempts_left = get_attempts_left(game_frame or page)
-                                        smtp_email = os.environ.get(ENV_SMTP_EMAIL)
-                                        smtp_password = os.environ.get(ENV_SMTP_PASSWORD)
-                                        email_to = os.environ.get(ENV_EMAIL_TO) or smtp_email
-                                        if smtp_email and smtp_password:
-                                            if send_attempt_email(smtp_email, smtp_password, email_to, clicks_used, ts, attempts_left):
-                                                print("  [Email sent.]")
-                                        if args.one_shot:
-                                            print("  [One-shot: exiting after one attempt.]")
-                                            close_browser_safe()
-                                            return 0
-                                        break
-                                except Exception:
-                                    continue
+                            # Button and timer can live in different iframes; try preferred frame first, then all frames.
+                            target_frames = []
+                            if game_frame:
+                                target_frames.append(game_frame)
+                            for fr in page.frames:
+                                if fr not in target_frames:
+                                    target_frames.append(fr)
+
+                            clicked = False
+                            for fr in target_frames:
+                                for sel in BUTTON_SELECTORS:
+                                    try:
+                                        btn = fr.query_selector(sel)
+                                        if btn and btn.is_visible():
+                                            btn.click()
+                                            clicks_used += 1
+                                            print(f"\n  [Auto-clicked at {ts} (below best {effective_best}s) — {clicks_used}/{args.max_clicks} clicks used]")
+                                            last_notify_sec = -999
+                                            # Email report (env only; no credentials in repo)
+                                            time.sleep(2.0)
+                                            attempts_left = get_attempts_left(fr)
+                                            smtp_email = os.environ.get(ENV_SMTP_EMAIL)
+                                            smtp_password = os.environ.get(ENV_SMTP_PASSWORD)
+                                            email_to = os.environ.get(ENV_EMAIL_TO) or smtp_email
+                                            if smtp_email and smtp_password:
+                                                if send_attempt_email(smtp_email, smtp_password, email_to, clicks_used, ts, attempts_left):
+                                                    print("  [Email sent.]")
+                                            if args.one_shot:
+                                                print("  [One-shot: exiting after one attempt.]")
+                                                close_browser_safe()
+                                                return 0
+                                            clicked = True
+                                            break
+                                    except Exception:
+                                        continue
+                                if clicked:
+                                    break
+                            if not clicked:
+                                print(f"\n  [Auto-click condition met at {ts}, but button not clickable/found in frames. Check BUTTON_SELECTORS or iframe layout.]")
                         elif effective_best is None and timer_sec <= 3:
                             print("\n  [No leaderboard best or --best-time; skipping auto-click. Set --best-time SEC to override.]")
 
