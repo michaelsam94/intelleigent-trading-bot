@@ -72,9 +72,10 @@ def train_lstm(df_X: pd.DataFrame, df_y: pd.Series, model_config: dict):
     dropout = train_conf.get("dropout", 0.2)
     epochs = train_conf.get("epochs", 20)
     batch_size = train_conf.get("batch_size", 64)
+    verbose = train_conf.get("verbose", 0)
 
     model = _build_model(seq_len, n_features, units=units, dropout=dropout)
-    model.fit(X_seq, y_seq, epochs=epochs, batch_size=batch_size, verbose=0)
+    model.fit(X_seq, y_seq, epochs=epochs, batch_size=batch_size, verbose=verbose)
     return (model, scaler)
 
 
