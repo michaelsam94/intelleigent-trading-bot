@@ -22,6 +22,11 @@ from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None  # prompt in main() if used
+
 # Project root on path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
@@ -303,15 +308,13 @@ def main():
     if not cookies:
         return 1
 
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
+    if sync_playwright is None:
         print("Install Playwright: pip install playwright && playwright install chromium")
         return 1
 
     print(f"Opening game page (headless={args.headless})...")
     try:
-        return _run_btc_button_watch(args)
+        return _run_btc_button_watch(args, cookies)
     except Exception as e:
         msg = str(e)
         if "Connection closed" in msg or "Browser.close" in msg or "reading from the driver" in msg:
@@ -320,11 +323,8 @@ def main():
         raise
 
 
-def _run_btc_button_watch(args):
+def _run_btc_button_watch(args, cookies):
     """Inner run so we can catch Playwright shutdown errors from context manager exit."""
-    # Import here so _run_btc_button_watch() has access to the symbol even if
-    # main() performed the import check in a different local scope.
-    from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=args.headless)
         browser_closed = False
