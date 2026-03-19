@@ -322,6 +322,9 @@ def main():
 
 def _run_btc_button_watch(args):
     """Inner run so we can catch Playwright shutdown errors from context manager exit."""
+    # Import here so _run_btc_button_watch() has access to the symbol even if
+    # main() performed the import check in a different local scope.
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=args.headless)
         browser_closed = False
