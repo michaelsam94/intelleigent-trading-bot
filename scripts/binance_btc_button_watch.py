@@ -312,6 +312,20 @@ def main():
     print(f"Opening game page (headless={args.headless})...")
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=args.headless)
+        browser_closed = False
+
+        def close_browser_safe():
+            nonlocal browser_closed
+            if browser_closed:
+                return
+            try:
+                browser.close()
+            except Exception as e:
+                # When running under PM2 / one-shot, Playwright may already be tearing down.
+                # Don't fail the whole script due to shutdown race conditions.
+                print(f"  [WARN] browser.close() failed (ignored): {e}")
+            browser_closed = True
+
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -353,7 +367,7 @@ def main():
             if not clicked:
                 print("  [FAIL] Could not find or click the button. Check BUTTON_SELECTORS or page structure.")
             time.sleep(1)
-            browser.close()
+            close_browser_safe()
             return 0 if clicked else 1
 
         if args.test_find_button:
@@ -374,7 +388,7 @@ def main():
                 print("  [FAIL] No button found. Check BUTTON_SELECTORS or page structure.")
             else:
                 print("  ^ If the real game button has different class, add it to BUTTON_SELECTORS in the script.")
-            browser.close()
+            close_browser_safe()
             return 0 if found_any else 1
 
         last_notify_sec = -999
@@ -461,7 +475,7 @@ def main():
                                                 print("  [Email sent.]")
                                         if args.one_shot:
                                             print("  [One-shot: exiting after one attempt.]")
-                                            browser.close()
+                                            close_browser_safe()
                                             return 0
                                         break
                                 except Exception:
@@ -489,7 +503,7 @@ def main():
         except KeyboardInterrupt:
             print("\nStopped.")
 
-        browser.close()
+        close_browser_safe()
 
     return 0
 
