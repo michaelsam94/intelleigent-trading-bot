@@ -91,8 +91,10 @@ def generate_feature_set(df: pd.DataFrame, fs: dict, config: dict, model_store: 
         from common.classifier_meta import predict_meta
         base_cols = gen_config.get("columns", [])
         out_name = gen_config.get("name", "trade_score")
-        if len(base_cols) != 6:
-            raise ValueError(f"Meta generator expects 6 columns (high_lc, high_gb, high_xgb, low_lc, low_gb, low_xgb). Got {len(base_cols)}.")
+        if len(base_cols) not in (6, 8):
+            raise ValueError(
+                f"Meta generator expects 6 or 8 base columns (high/low × lc,gb,xgb [,dl]). Got {len(base_cols)}."
+            )
         model_pair = model_store.get_model_pair("trade_score_meta")
         if model_pair is None:
             log.warning("Meta model not loaded. Skipping meta step.")
@@ -254,6 +256,7 @@ def train_feature_set(df, fs, config) -> dict:
                 from common.classifier_lstm import train_lstm
                 model_pair = train_lstm(df_X, df_y, model_config)
                 models[score_column_name] = model_pair
+                print(f"Done '{score_column_name}'.")
             elif algo_type == "meta":
                 continue
             elif algo_type == "nn":
@@ -279,8 +282,9 @@ def train_feature_set(df, fs, config) -> dict:
         from common.classifier_lc import predict_lc
         from common.classifier_gb import predict_gb
         from common.classifier_xgb import predict_xgb
+        from common.classifier_lstm import predict_lstm
         base_cols = meta_cfg.get("params", {}).get("base_columns", [])
-        if len(base_cols) == 6 and len(labels) >= 2:
+        if len(base_cols) in (6, 8) and len(labels) >= 2:
             preds = {}
             for col in base_cols:
                 pair = models.get(col)
@@ -294,7 +298,9 @@ def train_feature_set(df, fs, config) -> dict:
                     preds[col] = predict_gb(pair, train_df[train_features], cfg)
                 elif algo_name == "xgb":
                     preds[col] = predict_xgb(pair, train_df[train_features], cfg)
-            if len(preds) == 6:
+                elif algo_name == "dl":
+                    preds[col] = predict_lstm(pair, train_df[train_features], cfg)
+            if len(preds) == len(base_cols):
                 df_meta = pd.DataFrame(preds, index=train_df.index)
                 df_y_meta = train_df[labels[0]].astype(float) - train_df[labels[1]].astype(float)
                 model_pair = train_meta(df_meta, df_y_meta, meta_cfg)

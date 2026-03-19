@@ -1,6 +1,6 @@
 """
-Meta-learner: takes base model predictions (e.g. high_20_05_lc, high_20_05_gb, high_20_05_xgb, low_20_05_*) and
-trains a linear model to predict (high - low) as regression target. At predict time outputs trade_score_meta.
+Meta-learner: takes base model predictions (6 cols: lc/gb/xgb × high/low, or 8 cols with +dl LSTM)
+and trains Ridge regression on (high_label - low_label). At predict time outputs trade_score_meta.
 """
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ from sklearn.linear_model import Ridge
 
 def train_meta(df_X: pd.DataFrame, df_y: pd.Series, model_config: dict):
     """
-    df_X: 6 columns (high_lc, high_gb, high_xgb, low_lc, low_gb, low_xgb).
+    df_X: 6 or 8 columns (high/low × lc, gb, xgb [, dl]).
     df_y: target = high_20_05 - low_20_05 (in {-1,0,1}) or continuous.
     Returns (model, None) - no scaler.
     """
@@ -25,7 +25,7 @@ def train_meta(df_X: pd.DataFrame, df_y: pd.Series, model_config: dict):
 
 
 def predict_meta(models: tuple, df_X_test: pd.DataFrame, model_config: dict):
-    """df_X_test has the 6 base prediction columns. Returns series of trade_score_meta."""
+    """df_X_test has the 6 or 8 base prediction columns. Returns series of trade_score_meta."""
     model = models[0]
     cols = getattr(model, "feature_names_in_", None) or df_X_test.columns.tolist()
     if isinstance(cols, (list, tuple)):

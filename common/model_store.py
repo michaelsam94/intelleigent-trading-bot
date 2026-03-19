@@ -194,10 +194,18 @@ class ModelStore:
         # Load scaler
         scaler_file_name = (self.model_path / score_column_name).with_suffix(".scaler")
         scaler = load(scaler_file_name)
-        # Load prediction model
-        model_extension = ".pickle"
-        model_file_name = (self.model_path / score_column_name).with_suffix(model_extension)
-        model = load(model_file_name)
+        # Load prediction model (Keras .keras preferred; else joblib .pickle)
+        keras_path = (self.model_path / score_column_name).with_suffix(".keras")
+        pickle_path = (self.model_path / score_column_name).with_suffix(".pickle")
+        if keras_path.is_file():
+            try:
+                import tensorflow as tf
+                model = tf.keras.models.load_model(keras_path)
+            except Exception as e:
+                log.error("Failed to load Keras model %s: %s", keras_path, e)
+                raise
+        else:
+            model = load(pickle_path)
 
         return (model, scaler)
 
@@ -210,10 +218,27 @@ class ModelStore:
         # Save scaler
         scaler_file_name = (self.model_path / column_name).with_suffix(".scaler")
         dump(scaler, scaler_file_name)
-        # Save prediction model
-        model_extension = ".pickle"
-        model_file_name = (self.model_path / column_name).with_suffix(model_extension)
-        dump(model, model_file_name)
+        # Save prediction model (TensorFlow/Keras must use .save(); joblib often fails)
+        pickle_path = (self.model_path / column_name).with_suffix(".pickle")
+        keras_path = (self.model_path / column_name).with_suffix(".keras")
+        if self._is_keras_model(model):
+            model.save(str(keras_path))
+            if pickle_path.exists():
+                pickle_path.unlink()
+        else:
+            if keras_path.exists():
+                keras_path.unlink()
+            dump(model, pickle_path)
+
+    @staticmethod
+    def _is_keras_model(model) -> bool:
+        if model is None:
+            return False
+        try:
+            import tensorflow as tf
+            return isinstance(model, tf.keras.Model)
+        except ImportError:
+            return False
 
 
 def resolve_algorithms_for_generator(algorithm_names: list, algorithms_default: list):
