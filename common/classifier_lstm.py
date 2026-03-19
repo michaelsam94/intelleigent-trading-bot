@@ -2,16 +2,22 @@
 LSTM sequence model (Keras): takes windows of features, outputs binary probability.
 Params: sequence_length (e.g. 60), is_scale, and train: units, dropout, epochs.
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
 from sklearn.preprocessing import StandardScaler
 
+_TF_IMPORT_ERROR: BaseException | None = None
 try:
-    from tensorflow import keras
-    from tensorflow.keras import layers
-except ImportError:
-    keras = None
+    import tensorflow as tf
+    keras = tf.keras
+    layers = tf.keras.layers
+except BaseException as e:  # ImportError, OSError (missing .so), etc.
+    keras = None  # type: ignore[assignment]
+    layers = None  # type: ignore[assignment]
+    _TF_IMPORT_ERROR = e
 
 
 def _build_model(seq_len, n_features, units=32, dropout=0.2):
@@ -24,9 +30,21 @@ def _build_model(seq_len, n_features, units=32, dropout=0.2):
     return model
 
 
-def train_lstm(df_X: pd.DataFrame, df_y: pd.Series, model_config: dict):
+def _require_tf():
     if keras is None:
-        raise ImportError("Install tensorflow for LSTM: pip install tensorflow")
+        hint = (
+            "TensorFlow is required for LSTM (config algorithm 'dl').\n"
+            "  source venv/bin/activate && pip install -r requirements.txt\n"
+            "Or: pip install 'tensorflow>=2.15'\n"
+            "On small VPS, try: pip install tensorflow-cpu  (if available for your platform)\n"
+        )
+        if _TF_IMPORT_ERROR is not None:
+            raise ImportError(hint + f"Import failed: {_TF_IMPORT_ERROR!r}") from _TF_IMPORT_ERROR
+        raise ImportError(hint)
+
+
+def train_lstm(df_X: pd.DataFrame, df_y: pd.Series, model_config: dict):
+    _require_tf()
     params = model_config.get("params", {})
     seq_len = int(params.get("sequence_length", 60))
     is_scale = params.get("is_scale", True)
@@ -61,6 +79,7 @@ def train_lstm(df_X: pd.DataFrame, df_y: pd.Series, model_config: dict):
 
 
 def predict_lstm(models: tuple, df_X_test: pd.DataFrame, model_config: dict):
+    _require_tf()
     model, scaler = models[0], models[1]
     params = model_config.get("params", {})
     seq_len = int(params.get("sequence_length", 60))

@@ -22,7 +22,7 @@ ta-lib  # Python wrapper for TA-lib (native) library
 # Algorithms
 scikit-learn>=1.6
 lightgbm==4.*
-xgboost>=2.*
+xgboost>=2.0
 tensorflow==2.20.*
 keras==3.13.*
 

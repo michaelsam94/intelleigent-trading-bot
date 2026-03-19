@@ -13,17 +13,28 @@
 
 ## Requirements
 
+TensorFlow is already pinned in `requirements.txt` (`tensorflow==2.20.*`). Install into your **venv**:
+
 ```bash
-pip install tensorflow
+cd /path/to/intelligent-trading-bot
+source venv/bin/activate   # or: . venv/bin/activate
+pip install -r requirements.txt
 ```
+
+Verify:
+
+```bash
+python -c "import tensorflow as tf; print(tf.__version__)"
+```
+
+If import fails with a **missing shared library** error on Linux, install OS deps (e.g. `libstdc++6`, `glibc`) or use a slightly older TF wheel that matches your distro. If TensorFlow has **no wheel for your CPU/arch** (some ARM/graviton setups), remove the `dl` algorithm from the 5min config and restore the 6-column meta (see Roll back below).
 
 CPU-only is fine for training/inference at this size. GPU optional.
 
 ## After pulling this change
 
-1. **Retrain** (old checkpoints have no `*_dl` models; meta expects 8 columns):
+1. **Retrain** (old checkpoints have no `*_dl` models; meta expects 8 columns). The pipeline script toggles `train` automatically:
    ```bash
-   # Set "train": true, then:
    ./scripts/run_pipeline_to_signals.sh configs/config-5min-realtime.jsonc configs/config-5min-realtime-ethusdc.jsonc
    ```
 2. LSTM models are saved as **`*.keras`** under `data/<SYMBOL>/model/` (not `.pickle`). Tree/linear models stay `.pickle`.
