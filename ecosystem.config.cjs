@@ -99,12 +99,13 @@ module.exports = {
     {
       name: "telegram-poll-debug",
       script: python,
-      args: ["scripts/telegram_poll_debug.py"],
+      // -u: unbuffered stdout/stderr so PM2 logs show lines immediately
+      args: ["-u", "scripts/telegram_poll_debug.py"],
       interpreter: "none",
       cwd: projectRoot,
       autorestart: true,
       watch: false,
-      env,
+      env: { ...env, PYTHONUNBUFFERED: "1" },
     },
   ],
 };

@@ -57,6 +57,20 @@ Optional one-time webhook clear (add to `.env`, restart once, then remove):
 TELEGRAM_DELETE_WEBHOOK=1
 ```
 
+### PM2 logs look empty / no `/start` appears
+
+1. **Restart with env** after editing `.env`:
+
+   ```bash
+   pm2 restart telegram-poll-debug --update-env
+   ```
+
+2. **Read startup lines** in `pm2 logs telegram-poll-debug` — the script prints `OK: bot @YourBot` and either `OK: no webhook` or a **WARN: Webhook is set**. If a webhook URL is set, **`getUpdates` stays empty** until you run `deleteWebhook` (set `TELEGRAM_DELETE_WEBHOOK=1` once as above).
+
+3. **Same bot** — Open the bot whose **@username** matches the line `OK: bot @…` in the logs. A different bot or wrong token will never show your `/start` here.
+
+4. **Buffering** — The app uses `python -u` and `PYTHONUNBUFFERED=1` so lines should appear immediately in PM2.
+
 ## Production options
 
 - **Webhook**: HTTPS URL, valid certificate, handler that parses Telegram’s JSON POST body.

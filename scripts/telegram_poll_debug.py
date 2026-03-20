@@ -11,6 +11,11 @@ Usage:
 
 Optional:
   export TELEGRAM_DELETE_WEBHOOK=1   # call deleteWebhook once before polling
+
+Under PM2, stdout is not a TTY — Python may buffer prints. This script uses flush=True;
+also set PYTHONUNBUFFERED=1 or run: python -u scripts/telegram_poll_debug.py
+
+If a webhook is set, getUpdates returns nothing until you deleteWebhook.
 """
 from __future__ import annotations
 
@@ -24,6 +29,11 @@ import urllib.request
 BASE = "https://api.telegram.org"
 
 
+def _log(msg: str, *, err: bool = False) -> None:
+    f = sys.stderr if err else sys.stdout
+    print(msg, file=f, flush=True)
+
+
 def _get(url: str, timeout: int = 30) -> dict:
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return json.loads(r.read().decode())
@@ -32,32 +42,72 @@ def _get(url: str, timeout: int = 30) -> dict:
 def main() -> int:
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
-        print("Set TELEGRAM_BOT_TOKEN", file=sys.stderr)
+        _log("ERROR: TELEGRAM_BOT_TOKEN is empty. Add it to .env and: pm2 restart telegram-poll-debug --update-env", err=True)
         return 1
 
+    enc = urllib.parse.quote(token, safe="")
+    # Prove token works (wrong token = immediate failure)
+    try:
+        me = _get(f"{BASE}/bot{enc}/getMe", timeout=15)
+    except Exception as e:
+        _log(f"ERROR: getMe failed (bad token or network): {e}", err=True)
+        return 1
+    if not me.get("ok"):
+        _log(f"ERROR: getMe: {me}", err=True)
+        return 1
+    uname = (me.get("result") or {}).get("username", "?")
+    _log(f"OK: bot @{uname} (token …{token[-6:]})")
+
+    # Webhook blocks long polling — user often sees empty getUpdates
+    try:
+        wh = _get(f"{BASE}/bot{enc}/getWebhookInfo", timeout=15)
+    except Exception as e:
+        _log(f"WARN: getWebhookInfo failed: {e}", err=True)
+        wh = {}
+    wh_url = ((wh.get("result") or {}) or {}).get("url") or ""
+    if wh_url:
+        _log(
+            f"WARN: Webhook is set to: {wh_url!r}\n"
+            "      getUpdates will stay empty until you remove it.\n"
+            "      Add TELEGRAM_DELETE_WEBHOOK=1 to .env once, then:\n"
+            "        pm2 restart telegram-poll-debug --update-env\n"
+            "      Or open: https://api.telegram.org/bot<TOKEN>/deleteWebhook",
+            err=True,
+        )
+    else:
+        _log("OK: no webhook (long polling can receive updates).")
+
     if os.environ.get("TELEGRAM_DELETE_WEBHOOK", "").strip() in ("1", "true", "yes"):
-        u = f"{BASE}/bot{urllib.parse.quote(token, safe='')}/deleteWebhook"
-        out = _get(u)
-        print("deleteWebhook:", json.dumps(out, indent=2))
+        out = _get(f"{BASE}/bot{enc}/deleteWebhook", timeout=15)
+        _log("deleteWebhook: " + json.dumps(out, indent=2))
 
     offset = 0
-    print("Polling getUpdates (Ctrl+C to stop). Send /start to the bot in Telegram.\n")
+    _log("Polling getUpdates. Send /start to this bot in Telegram (same @username as above).")
+    idle_loops = 0
     while True:
         q = urllib.parse.urlencode({"timeout": 25, "offset": offset})
-        url = f"{BASE}/bot{urllib.parse.quote(token, safe='')}/getUpdates?{q}"
+        url = f"{BASE}/bot{enc}/getUpdates?{q}"
         try:
             data = _get(url, timeout=35)
         except Exception as e:
-            print("Request error:", e)
+            _log(f"Request error: {e}", err=True)
             time.sleep(2)
             continue
         if not data.get("ok"):
-            print("Telegram error:", data)
+            _log(f"Telegram error: {data}", err=True)
             time.sleep(2)
             continue
-        for upd in data.get("result", []):
-            offset = upd["update_id"] + 1
-            print(json.dumps(upd, indent=2, ensure_ascii=False))
+        batch = data.get("result", [])
+        if batch:
+            idle_loops = 0
+            for upd in batch:
+                offset = upd["update_id"] + 1
+                _log(json.dumps(upd, indent=2, ensure_ascii=False))
+        else:
+            idle_loops += 1
+            # ~every 2.5 min of empty long-polls, prove we're alive in PM2 logs
+            if idle_loops % 6 == 0:
+                _log(f"…polling (no updates yet). offset={offset} If /start does nothing, check webhook warning above.")
         time.sleep(0.1)
 
 
