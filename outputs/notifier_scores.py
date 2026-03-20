@@ -121,7 +121,8 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
         # Default message if the score in the neutral (very weak) zone which is not covered by the config bands
         message = f"{symbol_char} {int(close_price):,} Indicator: {primary_score_str} {secondary_score_str} {freq}"
 
-    message = message.replace("+", "%2B")  # For Telegram to display plus sign
+    # Do not replace "+" with "%2B" here — urllib.parse.quote in broadcast_telegram_markdown
+    # already encodes the full text for the API URL; pre-encoding breaks display (shows literal %2B).
 
     #
     # Send notification
