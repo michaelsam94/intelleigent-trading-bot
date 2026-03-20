@@ -3,7 +3,6 @@ import sys
 from datetime import timedelta, datetime
 
 import asyncio
-import requests
 
 import pandas as pd
 import pandas.api.types as ptypes
@@ -11,6 +10,7 @@ import pandas.api.types as ptypes
 from service.App import *
 from common.utils import *
 from common.model_store import *
+from common.telegram_broadcast import broadcast_telegram_markdown, recipient_chat_ids
 
 import logging
 log = logging.getLogger('notifier')
@@ -127,28 +127,22 @@ async def send_score_notification(df, model: dict, config: dict, model_store: Mo
     # Send notification
     #
     bot_token = (config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "")
-    chat_id = str(chat_id).strip().replace("\n", "").replace("\r", "")
-
-    if _is_placeholder(bot_token) or _is_placeholder(chat_id):
+    if _is_placeholder(bot_token):
+        log.error("Telegram not sent: telegram_bot_token missing or placeholder.")
+        return
+    chats = recipient_chat_ids(config)
+    if not chats:
         log.error(
-            "Telegram not sent: telegram_bot_token or telegram_chat_id is missing or still a placeholder. "
-            "Set real values in config or export TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before starting the server (e.g. before pm2 start)."
+            "Telegram not sent: no recipients. Use /start on your bot (telegram-poll-debug) or set telegram_chat_id / TELEGRAM_CHAT_ID."
         )
         return
 
     try:
-        url = 'https://api.telegram.org/bot' + bot_token + '/sendMessage?chat_id=' + chat_id + '&parse_mode=markdown&text=' + message
-        response = requests.get(url)
-        response_json = response.json()
-        if not response_json.get('ok'):
-            log.error(
-                "Telegram API error: %s (full response: %s)",
-                response_json.get("description", "unknown"),
-                response_json,
-            )
+        n = broadcast_telegram_markdown(bot_token, message, config)
+        if n:
+            log.info("Telegram score notification sent to %s chat(s)", n)
         else:
-            log.info("Telegram notification sent to chat_id=%s", chat_id[:8] + "..." if len(chat_id) > 8 else chat_id)
+            log.error("Telegram score broadcast failed for all chats.")
     except Exception as e:
         log.error("Error sending Telegram notification: %s", e)
 

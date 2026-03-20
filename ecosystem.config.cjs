@@ -7,7 +7,9 @@
  * Env: merge .env from project root (if present) so you can keep secrets out of the shell.
  * Create .env with (do not commit):
  *   TELEGRAM_BOT_TOKEN=...
- *   TELEGRAM_CHAT_ID=...
+ *   TELEGRAM_CHAT_ID=...   # optional legacy single chat; subscribers from /start also used
+ *   TELEGRAM_REGISTER_SUBSCRIBERS=1   # telegram-poll-debug: save /start to data/telegram_subscribers.json (default on)
+ *   TELEGRAM_SUBSCRIBERS_FILE=...     # optional path to subscriber JSON (default data/telegram_subscribers.json)
  *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
  *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
  * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env

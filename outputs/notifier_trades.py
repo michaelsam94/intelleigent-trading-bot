@@ -9,11 +9,10 @@ import asyncio
 import pandas as pd
 import pandas.api.types as ptypes
 
-import requests
-
 from service.App import *
 from common.utils import *
 from common.model_store import *
+from common.telegram_broadcast import broadcast_telegram_markdown, recipient_chat_ids
 
 import logging
 log = logging.getLogger('notifier')
@@ -251,29 +250,24 @@ def _is_placeholder(val):
     return "<" in s or ">" in s or s.lower().startswith("your-") or s == ""
 
 
-def _send_telegram(bot_token, chat_id, text):
-    try:
-        import urllib.parse
-        url = "https://api.telegram.org/bot" + bot_token + "/sendMessage?chat_id=" + str(chat_id).strip() + "&parse_mode=markdown&text=" + urllib.parse.quote(text)
-        r = requests.get(url, timeout=10)
-        if not r.json().get("ok"):
-            log.error("Telegram send failed: %s", r.text)
-    except Exception as e:
-        log.error("Error sending Telegram: %s", e)
+def _send_telegram(bot_token, text, config):
+    """Broadcast to all /start subscribers + legacy telegram_chat_id / TELEGRAM_CHAT_ID."""
+    n = broadcast_telegram_markdown(bot_token, text, config)
+    if n == 0:
+        log.error("Telegram broadcast failed for all recipients (0 ok). Check token and chat_ids.")
 
 
 async def send_transaction_message(transaction, config):
     # Prefer config values, but treat placeholders as missing and fall back to env vars.
     cfg_token = (config.get("telegram_bot_token") or "").strip()
-    cfg_chat = str(config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
     bot_token = cfg_token if not _is_placeholder(cfg_token) else ""
     bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = cfg_chat if not _is_placeholder(cfg_chat) else ""
-    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip().replace("\n", "").replace("\r", "")
-    if not bot_token or not chat_id:
+    targets = recipient_chat_ids(config)
+    if not bot_token or not targets:
         log.error(
-            "Telegram not sent: telegram_bot_token or telegram_chat_id is missing or still a placeholder. "
-            "Set real values in config or export TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before starting the server (e.g. before pm2 start)."
+            "Telegram not sent: missing bot token or no chat recipients. "
+            "Set TELEGRAM_BOT_TOKEN. Recipients: data/telegram_subscribers.json (users send /start; run telegram-poll-debug) "
+            "and/or telegram_chat_id / TELEGRAM_CHAT_ID."
         )
         return
 
@@ -287,7 +281,7 @@ async def send_transaction_message(transaction, config):
         sl = transaction.get("sl_price", 0)
         emoji = "📈" if side == "LONG" else "📉"
         msg = f"{emoji} *{side} opened*\nPrice: {price:,.2f}\nTP: {tp:,.2f}\nSL: {sl:,.2f}"
-        _send_telegram(bot_token, chat_id, msg)
+        _send_telegram(bot_token, msg, config)
         return
 
     # --- Position closed (TP or SL): send P&L with leverage/fees and stats ---
@@ -309,7 +303,7 @@ async def send_transaction_message(transaction, config):
         msg = f"🔒 *{side} closed ({res})*\nEntry: {entry_price:,.2f} → Exit: {exit_price:,.2f}\n"
         msg += f"Price P&L: {profit_pct:+.2f}% → Margin: {leveraged_pnl_pct:+.2f}% | Fee: ${fee_usd:.2f}\n"
         msg += f"Balance: ${balance_after:.2f} | Total return: {total_return_pct:+.1f}%"
-        _send_telegram(bot_token, chat_id, msg)
+        _send_telegram(bot_token, msg, config)
 
         # Stats: wins, losses, total P&L $, total return %
         try:
@@ -326,7 +320,7 @@ async def send_transaction_message(transaction, config):
                 msg2 += f"Wins: {wins} | Losses: {losses}\n"
                 msg2 += f"Balance: ${balance_after:.2f} (start ${starting_balance:.2f})\n"
                 msg2 += f"Total return: {total_return_pct:+.1f}%"
-                _send_telegram(bot_token, chat_id, msg2)
+                _send_telegram(bot_token, msg2, config)
         except Exception as e:
             log.debug("Stats for Telegram skipped: %s", e)
         return
@@ -342,13 +336,13 @@ async def send_transaction_message(transaction, config):
     try:
         profit, profit_percent, profit_descr, profit_percent_descr = await generate_transaction_stats()
         message += f" Profit: {profit_percent:.2f}% {profit:.2f}₮*"
-        _send_telegram(bot_token, chat_id, message)
+        _send_telegram(bot_token, message, config)
         if status == "SELL":
             msg2 = "↗ *LONG stats (4w)*\n"
         else:
             msg2 = "↘ *SHORT stats (4w)*\n"
         msg2 += f"count={int(profit_percent_descr['count'])} mean={profit_percent_descr['mean']:.2f}% min={profit_percent_descr['min']:.2f}% max={profit_percent_descr['max']:.2f}%"
-        _send_telegram(bot_token, chat_id, msg2)
+        _send_telegram(bot_token, msg2, config)
     except Exception as e:
         log.error("Error building legacy stats: %s", e)
 

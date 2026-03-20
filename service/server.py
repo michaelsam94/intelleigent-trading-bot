@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from binance import Client
 
 from common.types import Venue
+from common.telegram_broadcast import broadcast_telegram_markdown, recipient_chat_ids
 from common.generators import output_feature_set
 from common.analyzer import Analyzer
 
@@ -156,24 +157,27 @@ async def process_ws_kline(dfs: dict):
 
 
 def _send_telegram_startup_message(symbol: str, freq: str):
-    """Send a one-line confirmation to Telegram on each server restart."""
+    """Send a one-line confirmation to all Telegram recipients on each server restart."""
     import os
     token = (App.config.get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = str(App.config.get("telegram_chat_id") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip().replace("\n", "").replace("\r", "")
-    if not token or not chat_id or "<" in token or "your-" in token.lower():
-        log.info("Telegram startup message skipped: token or chat_id missing/placeholder. Set in config or TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID env.")
+    if not token or "<" in token or "your-" in token.lower():
+        log.info("Telegram startup message skipped: token missing/placeholder.")
+        return
+    chats = recipient_chat_ids(App.config)
+    if not chats:
+        log.info(
+            "Telegram startup message skipped: no recipients (subscribers file empty and no telegram_chat_id / TELEGRAM_CHAT_ID)."
+        )
         return
     text = f"✅ ITB server started. {symbol} @ {freq} — Telegram connected."
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&parse_mode=markdown&text={requests.utils.quote(text)}"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if data.get("ok"):
-            log.info("Telegram startup message sent.")
-            print("Telegram startup message sent.", flush=True)
+        n = broadcast_telegram_markdown(token, text, App.config)
+        if n:
+            log.info("Telegram startup message sent to %s chat(s).", n)
+            print(f"Telegram startup message sent to {n} chat(s).", flush=True)
         else:
-            log.warning("Telegram startup message failed: %s", data.get("description", data))
-            print("Telegram startup message failed.", flush=True)
+            log.warning("Telegram startup message failed for all chats.")
+            print("Telegram startup message failed for all chats.", flush=True)
     except Exception as e:
         log.warning("Telegram startup message error: %s", e)
         print(f"Telegram startup message error: {e}", flush=True)
@@ -190,12 +194,20 @@ def start_server(config_file):
     # Log Telegram config status (to server.log and stdout so it appears in pm2 logs)
     t_token = (App.config.get("telegram_bot_token") or "").strip()
     t_chat = str(App.config.get("telegram_chat_id") or "").strip().replace("\n", "").replace("\r", "")
+    n_sub = len(recipient_chat_ids(App.config))
     if t_token and "<" not in t_token and "your-" not in t_token.lower():
-        msg = f"Telegram: token set (len={len(t_token)}), chat_id={t_chat[:12]}..." if len(t_chat) > 12 else f"Telegram: token set, chat_id={t_chat}"
+        legacy_preview = (t_chat[:12] + "...") if len(t_chat) > 12 else (t_chat or "(empty)")
+        msg = (
+            f"Telegram: token set (len={len(t_token)}), {n_sub} recipient(s) "
+            f"(subscribers file + config/env chat_id). Config telegram_chat_id preview={legacy_preview}"
+        )
         log.info(msg)
         print(msg, flush=True)
     else:
-        msg = "Telegram: token or chat_id missing/placeholder. Notifications will not send. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (env or config)."
+        msg = (
+            "Telegram: token missing/placeholder. Notifications need TELEGRAM_BOT_TOKEN plus recipients "
+            "(/start → data/telegram_subscribers.json and/or TELEGRAM_CHAT_ID / telegram_chat_id)."
+        )
         log.warning(msg)
         print(msg, flush=True)
 

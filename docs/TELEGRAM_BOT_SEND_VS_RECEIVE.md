@@ -1,5 +1,30 @@
 # Telegram bot: sending vs receiving messages
 
+## Broadcast alerts to every user who sends `/start`
+
+The trading server sends Telegram alerts to **every chat ID** in this list:
+
+1. **`data/telegram_subscribers.json`** — filled when users message your bot **`/start`** (handled by PM2 app **`telegram-poll-debug`**). Each user is stored once; trade/score notifications go to **all** of them.
+2. **Optional legacy:** `telegram_chat_id` in config and/or **`TELEGRAM_CHAT_ID`** in `.env` — still merged in (deduplicated) if you want one fixed admin chat in addition to subscribers.
+
+Flow:
+
+1. Run **`telegram-poll-debug`** on the server (same machine as the trading servers so they share the `data/` folder — or set **`TELEGRAM_SUBSCRIBERS_FILE`** to the same path everywhere).
+2. Each user opens your bot in Telegram and sends **`/start`**. They get a confirmation; their `chat.id` is saved.
+3. **`/stop`** removes them from the list.
+4. Restart or run **`service.server`** — it reads the file on each send and broadcasts.
+
+Env:
+
+| Variable | Meaning |
+|----------|---------|
+| `TELEGRAM_REGISTER_SUBSCRIBERS` | `1` (default) = poll script registers `/start`; `0` = log only |
+| `TELEGRAM_SUBSCRIBERS_FILE` | Path to JSON list of chat ids (default `data/telegram_subscribers.json`) |
+
+The `data/` directory is gitignored; subscriber IDs stay on your server.
+
+---
+
 ## Why notifications work but `/start` seems “ignored”
 
 This project (and many trading setups) only **sends** messages to Telegram:
@@ -40,7 +65,7 @@ export TELEGRAM_BOT_TOKEN="..."
 python scripts/telegram_poll_debug.py
 ```
 
-Press Ctrl+C to stop. This is for **testing/debugging**, not a production bot.
+Press Ctrl+C to stop. With default settings it also **registers subscribers** on `/start` for broadcast alerts.
 
 ### Run with PM2 (from repo)
 
@@ -73,7 +98,7 @@ TELEGRAM_DELETE_WEBHOOK=1
 
 ## Production options
 
-- **Webhook**: HTTPS URL, valid certificate, handler that parses Telegram’s JSON POST body.
-- **Polling in a long-running process**: e.g. systemd/PM2 running a small Python service (not included in the trading bot’s core flow).
+- **Webhook**: HTTPS URL, valid certificate, handler that parses Telegram’s JSON POST body (you’d implement the same subscriber file logic there).
+- **Polling in a long-running process**: PM2 app **`telegram-poll-debug`** — required if you rely on `/start` subscribers instead of a single `TELEGRAM_CHAT_ID`.
 
-Your **trade notifier** does not need `/start` to work; it only needs `chat_id` + `token` to send alerts.
+**Trade/score Telegram** needs **`TELEGRAM_BOT_TOKEN`** (or config) plus **at least one recipient**: either subscribers from `/start` or `telegram_chat_id` / `TELEGRAM_CHAT_ID`.
