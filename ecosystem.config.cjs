@@ -13,6 +13,7 @@
  * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
  *
  * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game
+ * Start only Telegram poll debug:  pm2 start ecosystem.config.cjs --only telegram-poll-debug
  */
 const path = require("path");
 const fs = require("fs");
@@ -92,6 +93,16 @@ module.exports = {
       interpreter: "none",
       cwd: projectRoot,
       autorestart: false,
+      watch: false,
+      env,
+    },
+    {
+      name: "telegram-poll-debug",
+      script: python,
+      args: ["scripts/telegram_poll_debug.py"],
+      interpreter: "none",
+      cwd: projectRoot,
+      autorestart: true,
       watch: false,
       env,
     },
