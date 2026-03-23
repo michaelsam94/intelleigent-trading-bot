@@ -1,23 +1,38 @@
 /**
- * PM2 ecosystem file. Start both servers:
- *   pm2 start ecosystem.config.cjs
+ * PM2 ecosystem — project root, venv Python: ./venv/bin/python
  *
- * From project root. Uses venv Python if present: ./venv/bin/python
+ * PURPOSE (what each app does)
+ * ----------------------------
+ * server-btcusdc / server-btcusdc-5min / server-ethusdc / server-ethusdc-5min
+ *   → `python -m service.server -c <config>`: live market data, ML predictions, signals,
+ *      simulated trades (TP/SL). These are the “signal monitors” for each pair/timeframe.
+ * btc-game → Binance BTC button watcher (optional).
+ * telegram-poll-debug → Long-poll Telegram; /start registers chat IDs for broadcast alerts.
  *
- * Env: merge .env from project root (if present) so you can keep secrets out of the shell.
- * Create .env with (do not commit):
- *   TELEGRAM_BOT_TOKEN=...
- *   TELEGRAM_CHAT_ID=...   # optional legacy single chat; subscribers from /start also used
- *   TELEGRAM_REGISTER_SUBSCRIBERS=1   # telegram-poll-debug: save /start to data/telegram_subscribers.json (default on)
- *   TELEGRAM_SUBSCRIBERS_FILE=...     # optional path to subscriber JSON (default data/telegram_subscribers.json)
- *   PIPELINE_ON_TRADE_CLOSE=1         # optional: after each TP/SL close, run pipeline_then_pm2_restart.sh (see docs/PIPELINE_AFTER_TRADE_CLOSE.md)
- *   PIPELINE_CONFIGS=... PM2_RESTART_APPS=...     # optional overrides for that script
- *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
- *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
- * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
+ * After you edit .env, reload env into PM2:
+ *   pm2 restart ecosystem.config.cjs --update-env
  *
- * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game
- * Start only Telegram poll debug:  pm2 start ecosystem.config.cjs --only telegram-poll-debug
+ * --- Retrain + restart after each simulated trade closes (TP/SL) ---
+ * Set in .env (see docs/PIPELINE_AFTER_TRADE_CLOSE.md). Child servers spawn
+ * scripts/pipeline_then_pm2_restart.sh → run_pipeline_to_signals.sh (your configs) → pm2 restart …
+ *
+ *   PIPELINE_ON_TRADE_CLOSE=1
+ *   # Space-separated jsonc paths (same as run_pipeline_to_signals.sh arguments):
+ *   PIPELINE_CONFIGS="configs/config-5min-realtime.jsonc configs/config-5min-realtime-ethusdc.jsonc"
+ *   # Comma-separated PM2 apps to restart after pipeline finishes (must match names below):
+ *   PM2_RESTART_APPS=server-btcusdc-5min,server-ethusdc-5min
+ *
+ * Optional: PIPELINE_LOCK_DIR, PIPELINE_AFTER_CLOSE_LOG
+ *
+ * Other .env (do not commit):
+ *   TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=...
+ *   TELEGRAM_REGISTER_SUBSCRIBERS=1   TELEGRAM_SUBSCRIBERS_FILE=...
+ *   BINANCE_API_KEY=... BINANCE_API_SECRET=...
+ *   BINANCE_BUTTON_SMTP_EMAIL=... (btc-game)
+ *
+ * pm2 start ecosystem.config.cjs
+ * pm2 start ecosystem.config.cjs --only btc-game
+ * pm2 start ecosystem.config.cjs --only telegram-poll-debug
  */
 const path = require("path");
 const fs = require("fs");
@@ -48,6 +63,7 @@ module.exports = {
   apps: [
     {
       name: "server-btcusdc",
+      // Live signals + trades (BTC 1m); honors PIPELINE_ON_TRADE_CLOSE from .env
       script: python,
       args: ["-m", "service.server", "-c", "configs/config-1min-realtime.jsonc"],
       interpreter: "none",

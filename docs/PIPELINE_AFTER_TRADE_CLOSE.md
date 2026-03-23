@@ -1,20 +1,24 @@
 # Pipeline + PM2 restart after each trade close
 
-When a simulated position closes (TP or SL), you can optionally run the full **train → signals** pipeline and then **restart** the PM2 trading servers so they load fresh models.
+The **`server-*`** PM2 apps run `service.server`: they **monitor** the market, compute scores/signals, and run the **simulated** trader (TP/SL). When a position **closes**, you can optionally run **`scripts/run_pipeline_to_signals.sh`** with the **configs you choose**, then **restart** PM2 so servers load new models.
+
+Flow: **edit `.env`** → **`pm2 restart … --update-env`** so child processes see `PIPELINE_ON_TRADE_CLOSE`, `PIPELINE_CONFIGS`, etc.
 
 ## Enable
 
-In `.env` (or PM2 `env`):
+In **`.env`** at the project root (loaded by `ecosystem.config.cjs`):
 
 ```bash
 PIPELINE_ON_TRADE_CLOSE=1
+PIPELINE_CONFIGS="configs/config-5min-realtime.jsonc configs/config-5min-realtime-ethusdc.jsonc"
+PM2_RESTART_APPS=server-btcusdc-5min,server-ethusdc-5min
 ```
 
-Restart the trading server processes so they pick up the env:
+Adjust paths and PM2 **app names** to match `ecosystem.config.cjs`. Then reload env:
 
 ```bash
 pm2 restart ecosystem.config.cjs --update-env
-# or
+# or one server:
 pm2 restart server-btcusdc-5min --update-env
 ```
 
