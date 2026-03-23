@@ -10,6 +10,8 @@
  *   TELEGRAM_CHAT_ID=...   # optional legacy single chat; subscribers from /start also used
  *   TELEGRAM_REGISTER_SUBSCRIBERS=1   # telegram-poll-debug: save /start to data/telegram_subscribers.json (default on)
  *   TELEGRAM_SUBSCRIBERS_FILE=...     # optional path to subscriber JSON (default data/telegram_subscribers.json)
+ *   PIPELINE_ON_TRADE_CLOSE=1         # optional: after each TP/SL close, run pipeline_then_pm2_restart.sh (see docs/PIPELINE_AFTER_TRADE_CLOSE.md)
+ *   PIPELINE_CONFIGS=... PM2_RESTART_APPS=...     # optional overrides for that script
  *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
  *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
  * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env

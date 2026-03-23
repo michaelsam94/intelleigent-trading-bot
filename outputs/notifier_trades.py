@@ -21,6 +21,40 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 
 
+async def _maybe_trigger_pipeline_after_close() -> None:
+    """
+    If PIPELINE_ON_TRADE_CLOSE=1, run scripts/pipeline_then_pm2_restart.sh in the background
+    (full train→signals pipeline, then pm2 restart trading apps). Uses a lock so overlapping closes
+    do not start two pipelines.
+    """
+    v = os.environ.get("PIPELINE_ON_TRADE_CLOSE", "").strip().lower()
+    if v not in ("1", "true", "yes", "on"):
+        return
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "pipeline_then_pm2_restart.sh"
+    if not script.is_file():
+        log.warning("PIPELINE_ON_TRADE_CLOSE set but script missing: %s", script)
+        return
+
+    def _spawn():
+        import subprocess
+
+        subprocess.Popen(
+            ["/bin/bash", str(script)],
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _spawn)
+    log.info(
+        "Scheduled pipeline_then_pm2_restart.sh (PIPELINE_ON_TRADE_CLOSE). See logs/pipeline_after_close.log"
+    )
+
+
 async def trader_simulation(df, model: dict, config: dict, model_store: ModelStore):
     try:
         transaction = await generate_trader_transaction(df, model, config)
@@ -35,6 +69,12 @@ async def trader_simulation(df, model: dict, config: dict, model_store: ModelSto
     except Exception as e:
         log.error(f"Error in send_transaction_message function: {e}")
         return
+
+    if transaction.get("status") == "CLOSED":
+        try:
+            await _maybe_trigger_pipeline_after_close()
+        except Exception as e:
+            log.warning("Pipeline-after-close hook failed: %s", e)
 
 
 async def generate_trader_transaction(df, model: dict, config: dict):
