@@ -1,34 +1,68 @@
-# ETH (multi-coin) technical analysis → Telegram
+# ETH (multi-coin) technical analysis → Telegram (+ optional TA paper trading)
 
-PM2 app **`eth-ta-telegram`** runs `scripts/eth_ta_telegram.py`: it pulls **Binance spot** OHLCV for several timeframes, computes **TA-Lib** indicators (RSI, MACD, Stochastic, ATR, ADX, CCI, Williams %R, SMA/EMA stack), adds **classic pivot** levels from the previous daily candle, and sends a **plain-text** digest to the same Telegram recipients as the trading bot (`TELEGRAM_BOT_TOKEN` + subscribers / `TELEGRAM_CHAT_ID`).
+PM2 app **`eth-ta-telegram`** runs `scripts/eth_ta_telegram.py`: it pulls **Binance spot** OHLCV for several timeframes, computes **TA-Lib** indicators, adds **classic pivot** levels, and sends a **plain-text** digest to Telegram.
+
+## TA paper trading (same spirit as ML `trader_simulation`)
+
+Set **`TA_TRADE_SIM=1`** in `.env` to **open/close simulated positions** driven by **mean multi-TF TA score** (not the ML `trade_score`):
+
+- **Starting balance:** `TA_STARTING_BALANCE` (default **$10**)
+- **Leverage:** `TA_LEVERAGE` (default **20**)
+- **TP/SL:** ATR(14) on the **5m** chart × `TA_TP_ATR_MULT` / `TA_SL_ATR_MULT` (defaults **4.0** / **2.5**, same scale as `trader_simulation` in configs); if ATR missing, **% fallbacks** like the ML trader
+- **Fees:** `TA_FEE_BPS_PER_SIDE` (default **4** bps/side); margin P&L formula matches `outputs/notifier_trades.py` (open+close on notional, leveraged)
+- **State files (isolated from ML bot):** `data/ta_sim/<SYMBOL>/` — `position.json`, `balance.json`, `transactions_ta.txt`, `last_close.json` (does **not** use `data/<SYMBOL>/position.json` used by `service.server`)
+
+**Entry rules (defaults):**
+
+- **LONG** if mean TF score ≥ `TA_LONG_ENTRY_SCORE` (default **0.8**)
+- **SHORT** if mean TF score ≤ `TA_SHORT_ENTRY_SCORE` (default **-0.8**)
+- Cooldown: `TA_MIN_BARS_BETWEEN_TRADES` **5m bars** after a close (default **1**)
+
+Telegram messages for opens/closes are sent when `TELEGRAM_BOT_TOKEN` + recipients exist; otherwise events are **printed to PM2 logs** only.
+
+### Example `.env`
+
+```bash
+TA_TRADE_SIM=1
+TA_STARTING_BALANCE=10
+TA_LEVERAGE=20
+TA_FEE_BPS_PER_SIDE=4
+TA_TP_ATR_MULT=4.0
+TA_SL_ATR_MULT=2.5
+```
+
+Digest-only (no trades): omit `TA_TRADE_SIM` or set `TA_TRADE_SIM=0`.
 
 ## PM2
 
 ```bash
 pm2 start ecosystem.config.cjs --only eth-ta-telegram
+pm2 restart eth-ta-telegram --update-env
 pm2 logs eth-ta-telegram
 ```
 
-Requires `.env` with at least `TELEGRAM_BOT_TOKEN` and one recipient (subscribers via `/start` or `TELEGRAM_CHAT_ID`).
+For digest-only, you need `TELEGRAM_BOT_TOKEN` + recipients. For **trade sim without Telegram**, you can omit token; trades still run and log.
 
-## Environment
+## Environment (digest)
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `TA_SYMBOL` | `ETHUSDC` | Binance **spot** symbol (e.g. `ETHUSDT`) |
-| `TA_INTERVAL_SEC` | `300` | Seconds between digests (**5 minutes**) |
-| `TA_KLINES_LIMIT` | `500` | Bars per timeframe request |
-| `TA_SIGNAL_ALERTS` | `1` | Prepends a **📌 TA SIGNAL** line when many TFs align bullish/bearish |
-| `TA_SIGNAL_MIN_TF` | `4` | Min count of Buy/Sell labels across TFs to flag alignment |
+| `TA_SYMBOL` | `ETHUSDC` | Binance **spot** symbol |
+| `TA_INTERVAL_SEC` | `300` | Loop interval (5 min) |
+| `TA_KLINES_LIMIT` | `500` | Bars per TF |
+| `TA_SIGNAL_ALERTS` | `1` | BULLISH/BEARISH banner when many TFs align |
+| `TA_RESET_ON_START` | `0` | `1` = reset TA-sim balance + clear position on process start |
 
-Binance keys are **optional** (public klines). If rate-limited, set `BINANCE_API_KEY` / `BINANCE_API_SECRET` in `.env`.
+## ML trading vs TA-sim
 
-## “Signals” vs ML trading
+| | `server-*` (ML) | `eth-ta-telegram` + `TA_TRADE_SIM` |
+|--|-----------------|-------------------------------------|
+| Signal | `trade_score` + thresholds | Mean multi-TF TA score |
+| State | `data/<SYMBOL>/` | `data/ta_sim/<SYMBOL>/` |
 
-- **This service** sends **informational** TA summaries and optional **consensus banners** (bullish/bearish alignment). It does **not** place orders or feed `service.server` directly.
-- **Your existing servers** (`server-*`) still use **ML scores** + `threshold_rule` for simulated trades. To combine TA with ML you would add a custom gate in code or treat this digest as a manual filter.
+They can run side by side without sharing position files.
 
 ## Implementation notes
 
-- Indicators and thresholds are **heuristic** (not identical to TradingView’s UI).
-- Monthly (`1M`) bars may have fewer than 200 candles; long MAs are skipped when history is short.
+- Indicators are **heuristic** (not identical to TradingView).
+- Monthly bars may be short history for MA200.

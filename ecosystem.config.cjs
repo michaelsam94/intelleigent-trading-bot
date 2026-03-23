@@ -14,7 +14,8 @@
  *   PIPELINE_CONFIGS=... PM2_RESTART_APPS=...     # optional overrides for that script
  *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
  *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
- *   TA_SYMBOL=ETHUSDC TA_INTERVAL_SEC=300   # eth-ta-telegram: multi-TF TA digest to Telegram (see docs/ETH_TA_TELEGRAM.md)
+ *   TA_SYMBOL=ETHUSDC TA_INTERVAL_SEC=300   # eth-ta-telegram: multi-TF TA digest to Telegram
+ *   TA_TRADE_SIM=1 TA_STARTING_BALANCE=10 TA_LEVERAGE=20   # optional: TA paper trades (isolated data/ta_sim/) — docs/ETH_TA_TELEGRAM.md
  * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
  *
  * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game
@@ -116,7 +117,7 @@ module.exports = {
     {
       name: "eth-ta-telegram",
       script: python,
-      // Binance multi-timeframe TA (TA-Lib) → Telegram; not the ML trader (see docs/ETH_TA_TELEGRAM.md)
+      // TA digest → Telegram; optional TA_TRADE_SIM=1 paper trades ($10/20x/ATR TP-SL/fees) in data/ta_sim/ (see docs/ETH_TA_TELEGRAM.md)
       args: ["-u", "scripts/eth_ta_telegram.py"],
       interpreter: "none",
       cwd: projectRoot,
