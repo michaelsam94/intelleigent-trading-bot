@@ -197,6 +197,43 @@ def broadcast_telegram_markdown(bot_token: str, text: str, config: dict | None =
     return ok
 
 
+def broadcast_telegram_plain(bot_token: str, text: str, config: dict | None = None) -> int:
+    """
+    Send plain text to every recipient (no parse_mode — safe for arbitrary characters).
+    """
+    import requests
+
+    chats = recipient_chat_ids(config)
+    if not bot_token or not chats:
+        return 0
+    ok = 0
+    for i, chat_id in enumerate(chats):
+        if i:
+            time.sleep(0.04)
+        try:
+            url = (
+                "https://api.telegram.org/bot"
+                + bot_token
+                + "/sendMessage?chat_id="
+                + str(chat_id).strip()
+                + "&text="
+                + urllib.parse.quote(text)
+            )
+            r = requests.get(url, timeout=12)
+            body = r.json() if r.content else {}
+            if body.get("ok"):
+                ok += 1
+            else:
+                log.warning(
+                    "Telegram plain send failed chat_id=%s: %s",
+                    chat_id,
+                    body.get("description", r.text[:300]),
+                )
+        except Exception as e:
+            log.warning("Telegram plain send error chat_id=%s: %s", chat_id, e)
+    return ok
+
+
 def send_telegram_plain(bot_token: str, chat_id: str | int, text: str) -> bool:
     """Single chat, no parse_mode (safe for arbitrary text). Uses stdlib only."""
     import urllib.request
