@@ -16,6 +16,8 @@
  *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
  *   TA_SYMBOL=ETHUSDC TA_INTERVAL_SEC=300   # eth-ta-telegram: multi-TF TA digest to Telegram
  *   TA_TRADE_SIM=1 TA_STARTING_BALANCE=10 TA_LEVERAGE=20   # optional: TA paper trades (isolated data/ta_sim/) — docs/ETH_TA_TELEGRAM.md
+ *   TA_USE_GEMINI=1 GEMINI_API_KEY=... GEMINI_MODEL=gemini-1.5-flash   # optional: Gemini decides LONG/SHORT/HOLD + TP/SL prices
+ *   TA_RESET_BALANCE_ON_RESTART=1   # optional: reset TA-sim balance on pm2 restart (same as TA_RESET_ON_START)
  * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
  *
  * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game

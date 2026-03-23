@@ -9,6 +9,7 @@ pyarrow  # If parquet is used. Alternatively fastparquet
 # Downloaders/connectors
 python-binance==1.0.*
 requests  # Telegram notifications
+google-generativeai>=0.8.0  # optional: Gemini TA signals (scripts/eth_ta_telegram.py)
 websockets  # Binance WebSocket for real-time klines
 #yfinance
 #curl-cffi  # Used in yahoo downloder

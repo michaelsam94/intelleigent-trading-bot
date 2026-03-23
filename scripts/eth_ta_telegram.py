@@ -24,6 +24,11 @@ Env (TA trade sim — set TA_TRADE_SIM=1):
   TA_SHORT_ENTRY_SCORE=-0.8    # mean TF score <= this → open SHORT
   TA_MIN_BARS_BETWEEN_TRADES=1 # 5m bars after a close before new entry
   TA_STATE_DIR=data/ta_sim     # isolated from ML trader position.json
+  TA_RESET_BALANCE_ON_RESTART=1  # same effect as TA_RESET_ON_START: reset $ and position when process starts
+
+  TA_USE_GEMINI=1                # entries from Gemini (full TA in prompt); no Gemini calls while position open
+  GEMINI_API_KEY=...
+  GEMINI_MODEL=gemini-2.0-flash
 """
 from __future__ import annotations
 
@@ -48,6 +53,7 @@ from binance import Client
 from binance.exceptions import BinanceAPIException
 
 from common.telegram_broadcast import broadcast_telegram_plain, recipient_chat_ids
+from common.gemini_ta import run_gemini_decision, validate_tp_sl
 
 _KLINE_COLS = [
     "timestamp",
@@ -534,43 +540,93 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         except Exception:
             pass
 
-    # --- entry from mean TA score ---
-    ms = snap.mean_score
-    want_long = ms >= long_min
-    want_short = ms <= short_max
-    if not want_long and not want_short:
-        return
-    if want_long and want_short:
-        return
-
+    # --- entry: Gemini (TA_USE_GEMINI) or mean TA score ---
+    use_gemini = os.environ.get("TA_USE_GEMINI", "0").strip().lower() in ("1", "true", "yes", "on")
     atr = _atr_from_df(df)
     if atr is None or atr <= 0:
         atr = close_price * (tp_pct + sl_pct) / 2.0
 
-    if want_long:
-        side = "LONG"
-        tp_price = close_price + atr * tp_mult
-        sl_price = close_price - atr * sl_mult
-    else:
-        side = "SHORT"
-        tp_price = close_price - atr * tp_mult
-        sl_price = close_price + atr * sl_mult
+    side: str = ""
+    tp_price: float = 0.0
+    sl_price: float = 0.0
+    open_extra: str = ""
+    gemini_note = ""
 
-    _save_position(
-        symbol,
-        {
-            "open": True,
-            "side": side,
-            "entry_price": close_price,
-            "entry_time": str(close_time),
-            "tp_price": tp_price,
-            "sl_price": sl_price,
-            "atr_at_entry": atr,
-        },
-    )
+    if use_gemini:
+        if not (os.environ.get("GEMINI_API_KEY") or "").strip():
+            print("TA_USE_GEMINI=1 but GEMINI_API_KEY is empty", flush=True)
+            return
+        try:
+            dec = run_gemini_decision(
+                symbol,
+                close_price,
+                snap.text,
+                snap.tf_scores,
+                snap.tf_labels,
+                snap.mean_score,
+            )
+        except Exception as e:
+            print(f"Gemini decision failed: {e}", flush=True)
+            return
+        if not dec or dec.get("action") == "HOLD":
+            return
+        action = str(dec.get("action", "HOLD")).upper()
+        if action not in ("LONG", "SHORT"):
+            return
+        tp_raw = dec.get("take_profit")
+        sl_raw = dec.get("stop_loss")
+        side = action
+        tp_v, sl_v = validate_tp_sl(action, close_price, tp_raw, sl_raw)
+        if tp_v is not None and sl_v is not None:
+            tp_price, sl_price = tp_v, sl_v
+            open_reason = "gemini_prices"
+        else:
+            if action == "LONG":
+                tp_price = close_price + atr * tp_mult
+                sl_price = close_price - atr * sl_mult
+            else:
+                tp_price = close_price - atr * tp_mult
+                sl_price = close_price + atr * sl_mult
+            open_reason = "gemini_atr_fallback"
+        gemini_note = (dec.get("rationale") or "")[:500]
+        conf = dec.get("confidence", 0)
+        open_extra = f"Gemini conf={conf} | {open_reason}\n{gemini_note}" if gemini_note else f"Gemini conf={conf} | {open_reason}"
+    else:
+        ms = snap.mean_score
+        want_long = ms >= long_min
+        want_short = ms <= short_max
+        if not want_long and not want_short:
+            return
+        if want_long and want_short:
+            return
+        if want_long:
+            side = "LONG"
+            tp_price = close_price + atr * tp_mult
+            sl_price = close_price - atr * sl_mult
+            open_extra = f"Mean TA score {ms:+.2f}"
+        else:
+            side = "SHORT"
+            tp_price = close_price - atr * tp_mult
+            sl_price = close_price + atr * sl_mult
+            open_extra = f"Mean TA score {ms:+.2f}"
+
+    pos_data = {
+        "open": True,
+        "side": side,
+        "entry_price": close_price,
+        "entry_time": str(close_time),
+        "tp_price": tp_price,
+        "sl_price": sl_price,
+        "atr_at_entry": atr,
+    }
+    if use_gemini and gemini_note:
+        pos_data["gemini_rationale"] = gemini_note[:2000]
+
+    _save_position(symbol, pos_data)
     emoji = "📈" if side == "LONG" else "📉"
     _tx(
-        f"{emoji} TA-SIM {side} opened (mean score {ms:+.2f})\n"
+        f"{emoji} TA-SIM {side} opened\n"
+        f"{open_extra}\n"
         f"Price: {close_price:,.2f}\n"
         f"TP: {tp_price:,.2f} | SL: {sl_price:,.2f}\n"
         f"ATR(14)≈{atr:.4f} | Leverage {lev}x | Balance ${balance_before:.2f}\n"
@@ -593,11 +649,15 @@ def main() -> int:
     interval_sec = int(os.environ.get("TA_INTERVAL_SEC", "300"))
     limit = int(os.environ.get("TA_KLINES_LIMIT", "500"))
 
-    if os.environ.get("TA_RESET_ON_START", "0").strip() in ("1", "true", "yes"):
+    reset_env = (
+        os.environ.get("TA_RESET_ON_START", "0").strip().lower() in ("1", "true", "yes", "on")
+        or os.environ.get("TA_RESET_BALANCE_ON_RESTART", "0").strip().lower() in ("1", "true", "yes", "on")
+    )
+    if reset_env:
         st = float(os.environ.get("TA_STARTING_BALANCE", "10"))
         _save_balance(symbol, st, st)
         _clear_position(symbol)
-        print(f"TA_RESET_ON_START: balance reset to {st}", flush=True)
+        print(f"TA reset on start: balance={st}, position cleared (TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)", flush=True)
 
     print(
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim}",
