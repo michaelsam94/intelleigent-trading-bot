@@ -6,7 +6,7 @@ PM2 app **`eth-ta-telegram`** runs `scripts/eth_ta_telegram.py`: it pulls **Bina
 
 Set **`TA_TRADE_SIM=1`** in **the project root `.env`** (same folder as `ecosystem.config.cjs`) and restart PM2 with **`pm2 restart eth-ta-telegram --update-env`**.
 
-**Alias:** **`TA_TRADE_SIM_ENABLED=1`** is used if **`TA_TRADE_SIM`** is missing or blank (same pattern as Gemini flags).
+**Aliases:** **`TA_TRADE_SIM_ENABLED=1`** or **`TA_TRADE_ENABLED=1`** apply if **`TA_TRADE_SIM`** is missing or blank (same pattern as Gemini flags). Use **`TA_TRADE_SIM=1`** to avoid ambiguity.
 
 If logs still show **`trade_sim=False`**, check the startup line **`env check: TA_TRADE_SIM=...`** — if it shows **`None`** or **`'0'`**, the process is not reading your `.env`. Try **`pm2 delete eth-ta-telegram`** then **`pm2 start ecosystem.config.cjs --only eth-ta-telegram`** so PM2 reloads env from disk. Avoid a stray **`TA_TRADE_SIM=`** line with no value unless you rely on **`TA_TRADE_SIM_ENABLED`**.
 
@@ -142,6 +142,7 @@ pm2 logs eth-ta-telegram
 |----------|---------|---------|
 | `TA_TRADE_SIM` | `0` | **`1`** = run TA paper trades (opens/closes); **`0`** = digest only |
 | `TA_TRADE_SIM_ENABLED` | — | Same as **`TA_TRADE_SIM`** when **`TA_TRADE_SIM`** is unset or empty |
+| `TA_TRADE_ENABLED` | — | Same as above (alternate name); do not confuse with **`TA_TRADE_SIM`** |
 | `TA_SUPPRESS_TRADE_SIM_DIGEST_HINT` | `0` | **`1`** = do not append “TA paper trading is OFF” footer when `TA_TRADE_SIM=0` |
 | `TA_SYMBOL` | `ETHUSDC` | Binance **spot** symbol |
 | `TA_INTERVAL_SEC` | `300` | Loop interval (5 min) |

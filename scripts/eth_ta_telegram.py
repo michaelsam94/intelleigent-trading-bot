@@ -13,7 +13,7 @@ Env (digest):
   TELEGRAM_BOT_TOKEN=...
 
 Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
-  TA_TRADE_SIM=1              # or TA_TRADE_SIM_ENABLED=1 if TA_TRADE_SIM is unset/empty
+  TA_TRADE_SIM=1              # or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED if TA_TRADE_SIM unset/empty
   TA_STARTING_BALANCE=10
   TA_LEVERAGE=20
   TA_FEE_BPS_PER_SIDE=4
@@ -113,7 +113,8 @@ def _signal_on_5m() -> bool:
 
 def _ta_trade_sim_enabled() -> bool:
     """
-    Paper trading when TA_TRADE_SIM is truthy, or TA_TRADE_SIM_ENABLED if TA_TRADE_SIM is unset/empty.
+    Paper trading when TA_TRADE_SIM is truthy, else TA_TRADE_SIM_ENABLED or TA_TRADE_ENABLED
+    (common typo) if TA_TRADE_SIM is unset/empty.
     Strips UTF-8 BOM from values (bad .env / exports).
     """
 
@@ -127,7 +128,12 @@ def _ta_trade_sim_enabled() -> bool:
     if primary is not None and _norm(primary) != "":
         v = _norm(primary)
     else:
-        v = _norm(os.environ.get("TA_TRADE_SIM_ENABLED") or "0")
+        alt = (
+            os.environ.get("TA_TRADE_SIM_ENABLED")
+            or os.environ.get("TA_TRADE_ENABLED")
+            or "0"
+        )
+        v = _norm(alt)
     return v in ("1", "true", "yes", "on")
 
 
@@ -878,13 +884,14 @@ def main() -> int:
     )
     print(
         f"env check: TA_TRADE_SIM={repr(os.environ.get('TA_TRADE_SIM'))} "
-        f"TA_TRADE_SIM_ENABLED={repr(os.environ.get('TA_TRADE_SIM_ENABLED'))}",
+        f"TA_TRADE_SIM_ENABLED={repr(os.environ.get('TA_TRADE_SIM_ENABLED'))} "
+        f"TA_TRADE_ENABLED={repr(os.environ.get('TA_TRADE_ENABLED'))}",
         flush=True,
     )
     if not trade_sim:
         print(
             "TA_TRADE_SIM is off — no TA-SIM open/close messages. "
-            "Set TA_TRADE_SIM=1 (or TA_TRADE_SIM_ENABLED=1) in project .env, then pm2 restart eth-ta-telegram --update-env. "
+            "Set TA_TRADE_SIM=1 (or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED) in project .env, then pm2 restart eth-ta-telegram --update-env. "
             "If it stays off, run: pm2 delete eth-ta-telegram && pm2 start ecosystem.config.cjs --only eth-ta-telegram",
             flush=True,
         )
@@ -900,7 +907,7 @@ def main() -> int:
             elif not _suppress_trade_sim_digest_hint():
                 msg += (
                     "\n\n---\n"
-                    "TA paper trading is OFF (TA_TRADE_SIM / TA_TRADE_SIM_ENABLED). "
+                    "TA paper trading is OFF (set TA_TRADE_SIM=1, or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED). "
                     "No TA-SIM entry/TP/SL messages are sent. "
                     "Set TA_TRADE_SIM=1 in project .env, then pm2 restart eth-ta-telegram --update-env"
                 )

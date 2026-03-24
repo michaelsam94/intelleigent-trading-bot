@@ -15,7 +15,7 @@
  *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
  *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
  *   TA_SYMBOL=ETHUSDC TA_INTERVAL_SEC=300   # eth-ta-telegram: multi-TF TA digest to Telegram
- *   TA_TRADE_SIM=1   or   TA_TRADE_SIM_ENABLED=1   # optional: TA paper trades (isolated data/ta_sim/) — docs/ETH_TA_TELEGRAM.md
+ *   TA_TRADE_SIM=1   or   TA_TRADE_SIM_ENABLED=1   or   TA_TRADE_ENABLED=1   # optional: TA paper trades — docs/ETH_TA_TELEGRAM.md
  *   TA_STARTING_BALANCE=10 TA_LEVERAGE=20
  *   TA_USE_GEMINI=0|1   or   TA_GEMINI_ENABLED=0|1   # optional Gemini for eth-ta-telegram entries (default off); GEMINI_API_KEY=... GEMINI_MODEL=...
  *   TA_OPEN_EVERY_DIGEST=1 TA_DIGEST_5M_ONLY=1 TA_TP_PRICE_PCT=5 TA_SL_PRICE_PCT=3   # optional: one TA-SIM open per digest when flat (5m sign), fixed % TP/SL
@@ -134,11 +134,11 @@ module.exports = {
       env: {
         ...env,
         PYTHONUNBUFFERED: "1",
-        // Paper trades: non-empty TA_TRADE_SIM wins; else TA_TRADE_SIM_ENABLED; else "0" (?? ignores only null/undefined, not "")
+        // Paper trades: non-empty TA_TRADE_SIM wins; else TA_TRADE_SIM_ENABLED or TA_TRADE_ENABLED; else "0"
         TA_TRADE_SIM:
           env.TA_TRADE_SIM != null && String(env.TA_TRADE_SIM).trim() !== ""
             ? env.TA_TRADE_SIM
-            : env.TA_TRADE_SIM_ENABLED ?? "0",
+            : env.TA_TRADE_SIM_ENABLED ?? env.TA_TRADE_ENABLED ?? "0",
         // Gemini for TA paper entries: default off; set TA_USE_GEMINI=1 or TA_GEMINI_ENABLED=1 in .env (+ GEMINI_API_KEY)
         TA_USE_GEMINI: env.TA_USE_GEMINI ?? env.TA_GEMINI_ENABLED ?? "0",
       },
