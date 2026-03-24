@@ -63,14 +63,26 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 - **SHORT** if that score ≤ `TA_SHORT_ENTRY_SCORE` (default **-0.8**)
 - **TP/SL:** ATR(14) on **5m** × `TA_TP_ATR_MULT` / `TA_SL_ATR_MULT` (defaults **4.0** / **2.5**), with **% fallbacks** if ATR missing
 
+### Enable / disable Gemini
+
+| Setting | Default | Meaning |
+|---------|---------|--------|
+| **`TA_USE_GEMINI`** | **`0`** (off) | Set to **`1`** to call Gemini for paper-trade entries when flat (before TA score fallback). |
+| **`TA_GEMINI_ENABLED`** | *(unset)* | Same as **`TA_USE_GEMINI`** if **`TA_USE_GEMINI`** is not set (alias). If **both** are set, **`TA_USE_GEMINI`** wins. |
+
+Gemini is **not** used when **`TA_OPEN_EVERY_DIGEST=1`** (open-every mode always wins).
+
+PM2 **`ecosystem.config.cjs`** sets **`TA_USE_GEMINI`** from `.env` with default **`0`** so behavior is explicit.
+
 ### Entry mode B — Google Gemini (`TA_USE_GEMINI=1`)
 
 1. `pip install google-generativeai` (see `requirements.txt`).
-2. Set **`GEMINI_API_KEY`** and optionally **`GEMINI_MODEL`** (default **`gemini-1.5-flash`**).
+2. Set **`TA_USE_GEMINI=1`** (or **`TA_GEMINI_ENABLED=1`** if you prefer not to set **`TA_USE_GEMINI`**), plus **`GEMINI_API_KEY`** and optionally **`GEMINI_MODEL`** (default **`gemini-1.5-flash`**).
 3. The full TA digest + numeric summary is sent to Gemini with a strict JSON-only prompt.
 4. Model returns `action` (`LONG` / `SHORT` / `HOLD`), optional `take_profit` / `stop_loss` (absolute prices), `confidence`, `rationale`.
 5. If TP/SL pass validation vs entry, those prices are used; otherwise **ATR fallback** keeps Gemini’s direction only.
-6. **While a position is open**, Gemini is **not** called — only TP/SL checks on 5m bars (same as ML trader). After flat + cooldown, the next cycle may call Gemini again.
+6. If Gemini returns **`HOLD`**, the API call fails, or the key is missing, the bot **falls through** to the same **TA score** entry rules as mode A (fixed % + fixed TP/SL if enabled, else ATR TP/SL) — so a strong **5m** score can still open a position.
+7. **While a position is open**, Gemini is **not** called — only TP/SL checks on 5m bars (same as ML trader). After flat + cooldown, the next cycle may call Gemini again.
 
 Telegram messages for opens/closes require `TELEGRAM_BOT_TOKEN` + recipients; otherwise PM2 logs only.
 
@@ -130,6 +142,10 @@ pm2 logs eth-ta-telegram
 | `TA_ENTRY_ON_SIGNAL_BANNER` | `0` | `1` = open when 📌 BULLISH/BEARISH banner fires (full digest only); fixed % TP/SL |
 | `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | Fixed TP/SL % on price (with open-every or `TA_USE_FIXED_TP_SL_PCT`) |
 | `TA_USE_FIXED_TP_SL_PCT` | `0` | `1` = fixed % TP/SL with score thresholds (5m or mean per `TA_SIGNAL_ON_5M`) |
+| `TA_USE_GEMINI` | `0` | `1` = Gemini for entries when flat; `0` = TA score only (see **`TA_GEMINI_ENABLED`** alias above) |
+| `TA_GEMINI_ENABLED` | — | Alias for **`TA_USE_GEMINI`** when **`TA_USE_GEMINI`** is unset |
+| `GEMINI_API_KEY` | — | Required if Gemini enabled |
+| `GEMINI_MODEL` | `gemini-1.5-flash` | Optional model name |
 
 ## ML trading vs TA-sim
 
@@ -141,4 +157,4 @@ pm2 logs eth-ta-telegram
 ## Implementation notes
 
 - Indicators are **heuristic** (not identical to TradingView).
-- Gemini output is parsed as JSON; failures fall back to no new trade that cycle.
+- Gemini output is parsed as JSON; **`HOLD` or API errors** fall back to **TA score** entry (mode A), not a hard stop.

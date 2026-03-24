@@ -16,7 +16,7 @@
  *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
  *   TA_SYMBOL=ETHUSDC TA_INTERVAL_SEC=300   # eth-ta-telegram: multi-TF TA digest to Telegram
  *   TA_TRADE_SIM=1 TA_STARTING_BALANCE=10 TA_LEVERAGE=20   # optional: TA paper trades (isolated data/ta_sim/) — docs/ETH_TA_TELEGRAM.md
- *   TA_USE_GEMINI=1 GEMINI_API_KEY=... GEMINI_MODEL=gemini-1.5-flash   # optional: Gemini decides LONG/SHORT/HOLD + TP/SL prices
+ *   TA_USE_GEMINI=0|1   or   TA_GEMINI_ENABLED=0|1   # optional Gemini for eth-ta-telegram entries (default off); GEMINI_API_KEY=... GEMINI_MODEL=...
  *   TA_OPEN_EVERY_DIGEST=1 TA_DIGEST_5M_ONLY=1 TA_TP_PRICE_PCT=5 TA_SL_PRICE_PCT=3   # optional: one TA-SIM open per digest when flat (5m sign), fixed % TP/SL
  *   TA_RESET_BALANCE_ON_RESTART=1   # optional: reset TA-sim balance on pm2 restart (same as TA_RESET_ON_START)
  * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
@@ -126,7 +126,12 @@ module.exports = {
       cwd: projectRoot,
       autorestart: true,
       watch: false,
-      env: { ...env, PYTHONUNBUFFERED: "1" },
+      env: {
+        ...env,
+        PYTHONUNBUFFERED: "1",
+        // Gemini for TA paper entries: default off; set TA_USE_GEMINI=1 or TA_GEMINI_ENABLED=1 in .env (+ GEMINI_API_KEY)
+        TA_USE_GEMINI: env.TA_USE_GEMINI ?? env.TA_GEMINI_ENABLED ?? "0",
+      },
     },
   ],
 };

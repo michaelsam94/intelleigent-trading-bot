@@ -31,8 +31,9 @@ Env (TA trade sim — set TA_TRADE_SIM=1):
   TA_TP_PRICE_PCT=5            # fixed TP % on underlying price (with TA_OPEN_EVERY_DIGEST or TA_USE_FIXED_TP_SL_PCT)
   TA_SL_PRICE_PCT=3            # fixed SL % on underlying price
 
-  TA_USE_GEMINI=1              # disabled when TA_OPEN_EVERY_DIGEST=1
-  GEMINI_API_KEY=...
+  TA_USE_GEMINI=0              # 1=enable Gemini for entries; 0=disable (TA score only). Alias: TA_GEMINI_ENABLED
+  TA_GEMINI_ENABLED=0          # if TA_USE_GEMINI unset, same meaning as TA_USE_GEMINI
+  GEMINI_API_KEY=...           # required when Gemini enabled
   GEMINI_MODEL=gemini-1.5-flash
 
   TA_ENTRY_ON_SIGNAL_BANNER=0  # if 1: open LONG/SHORT when 📌 BULLISH/BEARISH banner fires (same TP%/SL% as open-every); falls back to Gemini/mean if no banner
@@ -107,6 +108,19 @@ def _last(x: np.ndarray | None) -> float | None:
 def _signal_on_5m() -> bool:
     """When True, signal banner and entry thresholds use 5m TF score/label (default on)."""
     return os.environ.get("TA_SIGNAL_ON_5M", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _gemini_entries_env_enabled() -> bool:
+    """
+    Whether Gemini is enabled for paper-trade entries (before TA_OPEN_EVERY_DIGEST turns it off).
+    TA_USE_GEMINI wins if set; otherwise TA_GEMINI_ENABLED (default off).
+    """
+    primary = os.environ.get("TA_USE_GEMINI")
+    if primary is not None and str(primary).strip() != "":
+        v = str(primary).strip().lower()
+    else:
+        v = (os.environ.get("TA_GEMINI_ENABLED") or "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _tf_label(score: float) -> str:
@@ -654,9 +668,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         "on",
     )
 
-    use_gemini = (
-        os.environ.get("TA_USE_GEMINI", "0").strip().lower() in ("1", "true", "yes", "on") and not open_every
-    )
+    use_gemini = _gemini_entries_env_enabled() and not open_every
 
     atr = _atr_from_df(df)
     if atr is None or atr <= 0:
@@ -689,46 +701,56 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             )
 
     if not side and use_gemini:
-        if not (os.environ.get("GEMINI_API_KEY") or "").strip():
-            print("TA_USE_GEMINI=1 but GEMINI_API_KEY is empty", flush=True)
-            return
-        try:
-            dec = run_gemini_decision(
-                symbol,
-                close_price,
-                snap.text,
-                snap.tf_scores,
-                snap.tf_labels,
-                snap.score_for_entry,
-                aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
-            )
-        except Exception as e:
-            print(f"Gemini decision failed: {e}", flush=True)
-            return
-        if not dec or dec.get("action") == "HOLD":
-            return
-        action = str(dec.get("action", "HOLD")).upper()
-        if action not in ("LONG", "SHORT"):
-            return
-        tp_raw = dec.get("take_profit")
-        sl_raw = dec.get("stop_loss")
-        side = action
-        tp_v, sl_v = validate_tp_sl(action, close_price, tp_raw, sl_raw)
-        if tp_v is not None and sl_v is not None:
-            tp_price, sl_price = tp_v, sl_v
-            reason = "gemini_prices"
+        gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+        if not gemini_key:
+            print("Gemini enabled but GEMINI_API_KEY is empty — falling back to TA score entry", flush=True)
         else:
-            if action == "LONG":
-                tp_price = close_price + atr * tp_mult
-                sl_price = close_price - atr * sl_mult
-            else:
-                tp_price = close_price - atr * tp_mult
-                sl_price = close_price + atr * sl_mult
-            reason = "gemini_atr_fallback"
-        gemini_note = (dec.get("rationale") or "")[:500]
-        conf = dec.get("confidence", 0)
-        open_extra = f"Gemini conf={conf} | {reason}\n{gemini_note}" if gemini_note else f"Gemini conf={conf} | {reason}"
-    elif not side and use_fixed_tp_sl:
+            dec = None
+            try:
+                dec = run_gemini_decision(
+                    symbol,
+                    close_price,
+                    snap.text,
+                    snap.tf_scores,
+                    snap.tf_labels,
+                    snap.score_for_entry,
+                    aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+                )
+            except Exception as e:
+                print(f"Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+            if dec:
+                action = str(dec.get("action", "HOLD")).upper()
+                if action in ("LONG", "SHORT"):
+                    tp_raw = dec.get("take_profit")
+                    sl_raw = dec.get("stop_loss")
+                    tp_v, sl_v = validate_tp_sl(action, close_price, tp_raw, sl_raw)
+                    if tp_v is not None and sl_v is not None:
+                        side = action
+                        tp_price, sl_price = tp_v, sl_v
+                        reason = "gemini_prices"
+                    else:
+                        side = action
+                        if action == "LONG":
+                            tp_price = close_price + atr * tp_mult
+                            sl_price = close_price - atr * sl_mult
+                        else:
+                            tp_price = close_price - atr * tp_mult
+                            sl_price = close_price + atr * sl_mult
+                        reason = "gemini_atr_fallback"
+                    gemini_note = (dec.get("rationale") or "")[:500]
+                    conf = dec.get("confidence", 0)
+                    open_extra = (
+                        f"Gemini conf={conf} | {reason}\n{gemini_note}"
+                        if gemini_note
+                        else f"Gemini conf={conf} | {reason}"
+                    )
+                else:
+                    print(
+                        f"Gemini action={action} — falling back to TA score entry if thresholds match",
+                        flush=True,
+                    )
+
+    if not side and use_fixed_tp_sl:
         ms = snap.score_for_entry
         es = "5m" if snap.entry_score_kind == "5m" else "mean TF"
         want_long = ms >= long_min
@@ -820,7 +842,8 @@ def main() -> int:
         )
 
     print(
-        f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim}",
+        f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim} "
+        f"gemini_entries={_gemini_entries_env_enabled()} (off when TA_OPEN_EVERY_DIGEST=1)",
         flush=True,
     )
 
