@@ -12,7 +12,8 @@ Env (digest):
   TA_SIGNAL_ALERTS=1
   TELEGRAM_BOT_TOKEN=...
 
-Env (TA trade sim — set TA_TRADE_SIM=1):
+Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
+  TA_TRADE_SIM=1              # or TA_TRADE_SIM_ENABLED=1 if TA_TRADE_SIM is unset/empty
   TA_STARTING_BALANCE=10
   TA_LEVERAGE=20
   TA_FEE_BPS_PER_SIDE=4
@@ -108,6 +109,35 @@ def _last(x: np.ndarray | None) -> float | None:
 def _signal_on_5m() -> bool:
     """When True, signal banner and entry thresholds use 5m TF score/label (default on)."""
     return os.environ.get("TA_SIGNAL_ON_5M", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ta_trade_sim_enabled() -> bool:
+    """
+    Paper trading when TA_TRADE_SIM is truthy, or TA_TRADE_SIM_ENABLED if TA_TRADE_SIM is unset/empty.
+    Strips UTF-8 BOM from values (bad .env / exports).
+    """
+
+    def _norm(s: str) -> str:
+        t = str(s).strip()
+        if t.startswith("\ufeff"):
+            t = t.lstrip("\ufeff").strip()
+        return t.lower()
+
+    primary = os.environ.get("TA_TRADE_SIM")
+    if primary is not None and _norm(primary) != "":
+        v = _norm(primary)
+    else:
+        v = _norm(os.environ.get("TA_TRADE_SIM_ENABLED") or "0")
+    return v in ("1", "true", "yes", "on")
+
+
+def _suppress_trade_sim_digest_hint() -> bool:
+    return os.environ.get("TA_SUPPRESS_TRADE_SIM_DIGEST_HINT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _gemini_entries_env_enabled() -> bool:
@@ -814,7 +844,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
 def main() -> int:
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    trade_sim = os.environ.get("TA_TRADE_SIM", "0").strip().lower() in ("1", "true", "yes", "on")
+    trade_sim = _ta_trade_sim_enabled()
 
     if not trade_sim and not token:
         print("Set TELEGRAM_BOT_TOKEN or enable TA_TRADE_SIM=1", file=sys.stderr)
@@ -846,6 +876,18 @@ def main() -> int:
         f"gemini_entries={_gemini_entries_env_enabled()} (off when TA_OPEN_EVERY_DIGEST=1)",
         flush=True,
     )
+    print(
+        f"env check: TA_TRADE_SIM={repr(os.environ.get('TA_TRADE_SIM'))} "
+        f"TA_TRADE_SIM_ENABLED={repr(os.environ.get('TA_TRADE_SIM_ENABLED'))}",
+        flush=True,
+    )
+    if not trade_sim:
+        print(
+            "TA_TRADE_SIM is off — no TA-SIM open/close messages. "
+            "Set TA_TRADE_SIM=1 (or TA_TRADE_SIM_ENABLED=1) in project .env, then pm2 restart eth-ta-telegram --update-env. "
+            "If it stays off, run: pm2 delete eth-ta-telegram && pm2 start ecosystem.config.cjs --only eth-ta-telegram",
+            flush=True,
+        )
 
     while True:
         try:
@@ -855,6 +897,13 @@ def main() -> int:
                 msg = snap.banner + "\n\n" + msg
             if trade_sim:
                 process_ta_trade_sim(symbol, snap, token)
+            elif not _suppress_trade_sim_digest_hint():
+                msg += (
+                    "\n\n---\n"
+                    "TA paper trading is OFF (TA_TRADE_SIM / TA_TRADE_SIM_ENABLED). "
+                    "No TA-SIM entry/TP/SL messages are sent. "
+                    "Set TA_TRADE_SIM=1 in project .env, then pm2 restart eth-ta-telegram --update-env"
+                )
             if token and recipient_chat_ids({}):
                 n = broadcast_telegram_plain(token, msg, {})
                 print(f"{datetime.now(timezone.utc).isoformat()} digest sent to {n} chat(s)", flush=True)
