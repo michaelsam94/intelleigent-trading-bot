@@ -34,6 +34,8 @@ Env (TA trade sim — set TA_TRADE_SIM=1):
   TA_USE_GEMINI=1              # disabled when TA_OPEN_EVERY_DIGEST=1
   GEMINI_API_KEY=...
   GEMINI_MODEL=gemini-1.5-flash
+
+  TA_ENTRY_ON_SIGNAL_BANNER=0  # if 1: open LONG/SHORT when 📌 BULLISH/BEARISH banner fires (same TP%/SL% as open-every); falls back to Gemini/mean if no banner
 """
 from __future__ import annotations
 
@@ -477,6 +479,18 @@ def _bar_close_time_5m(df: pd.DataFrame):
     return pd.Timestamp(ts) + pd.Timedelta(minutes=5)
 
 
+def _banner_entry_side(banner: str | None) -> str | None:
+    """LONG/SHORT from multi-TF signal banner text, or None."""
+    if not banner:
+        return None
+    u = banner.upper()
+    if "BULLISH" in u:
+        return "LONG"
+    if "BEARISH" in u:
+        return "SHORT"
+    return None
+
+
 def _tp_sl_fixed_price_pct(side: str, entry: float, tp_pct: float, sl_pct: float) -> tuple[float, float]:
     """TP/SL as percent move on underlying price (e.g. +5% TP, -3% SL for LONG)."""
     tpp = tp_pct / 100.0
@@ -599,6 +613,12 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     # --- entry: TA_OPEN_EVERY_DIGEST (5m score) > Gemini > fixed% + mean > ATR + mean ---
     open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
+    entry_on_banner = os.environ.get("TA_ENTRY_ON_SIGNAL_BANNER", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "5"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "3"))
     use_fixed_tp_sl = open_every or os.environ.get("TA_USE_FIXED_TP_SL_PCT", "0").strip().lower() in (
@@ -621,6 +641,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     sl_price: float = 0.0
     open_extra: str = ""
     gemini_note = ""
+    opened_from_banner = False
 
     if open_every:
         sc5 = snap.score_5m
@@ -630,7 +651,18 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             f"5m TA score {sc5:+.4f} | open each digest when flat | "
             f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
         )
-    elif use_gemini:
+    elif entry_on_banner and not open_every:
+        bs = _banner_entry_side(snap.banner)
+        if bs:
+            side = bs
+            opened_from_banner = True
+            tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
+            open_extra = (
+                f"Multi-TF banner entry ({snap.banner}) | "
+                f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
+            )
+
+    if not side and use_gemini:
         if not (os.environ.get("GEMINI_API_KEY") or "").strip():
             print("TA_USE_GEMINI=1 but GEMINI_API_KEY is empty", flush=True)
             return
@@ -669,7 +701,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         gemini_note = (dec.get("rationale") or "")[:500]
         conf = dec.get("confidence", 0)
         open_extra = f"Gemini conf={conf} | {reason}\n{gemini_note}" if gemini_note else f"Gemini conf={conf} | {reason}"
-    elif use_fixed_tp_sl:
+    elif not side and use_fixed_tp_sl:
         ms = snap.mean_score
         want_long = ms >= long_min
         want_short = ms <= short_max
@@ -680,7 +712,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         side = "LONG" if want_long else "SHORT"
         tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
         open_extra = f"Mean score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% (price)"
-    else:
+    elif not side:
         ms = snap.mean_score
         want_long = ms >= long_min
         want_short = ms <= short_max
@@ -699,6 +731,9 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             sl_price = close_price + atr * sl_mult
             open_extra = f"Mean TA score {ms:+.2f} (ATR TP/SL)"
 
+    if not side:
+        return
+
     pos_data = {
         "open": True,
         "side": side,
@@ -713,7 +748,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     _save_position(symbol, pos_data)
     emoji = "📈" if side == "LONG" else "📉"
-    if open_every or (use_fixed_tp_sl and not use_gemini):
+    if open_every or opened_from_banner or (use_fixed_tp_sl and not use_gemini):
         meta = f"Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
     else:
         meta = f"ATR(14)≈{atr:.4f} | Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"

@@ -35,6 +35,18 @@ Use this when you want **a new paper trade on every 5m cycle** while **flat** (n
 
 There is still **no new entry while a position is open**; after TP/SL, **`TA_MIN_BARS_BETWEEN_TRADES`** (default **1** five-minute bar) must pass before the next open.
 
+### Banner vs entry (why you can see “BULLISH” but no trade)
+
+The **📌 TA SIGNAL** line uses **TF label counts** (e.g. at least `TA_SIGNAL_MIN_TF` **buy** timeframes, default **4**). The **mean TF score** in the summary is a **separate** number — it can read **Neutral** while several TFs still show **Buy**.
+
+**Default paper entries** (when `TA_OPEN_EVERY_DIGEST=0` and Gemini off) use **only** the mean score vs `TA_LONG_ENTRY_SCORE` / `TA_SHORT_ENTRY_SCORE` (default **±0.8**). So a **Neutral** mean **never** opens a position.
+
+**Ways to get trades when the banner aligns:**
+
+1. **`TA_ENTRY_ON_SIGNAL_BANNER=1`** — if the full multi-TF digest shows **📌 BULLISH** or **📌 BEARISH**, open **LONG** / **SHORT** when flat (fixed **%** TP/SL via `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT`, same as open-every mode). If there is no banner that cycle, the bot falls through to Gemini (if enabled) or mean-score rules. **Requires** `TA_DIGEST_5M_ONLY=0` so the banner is computed (5m-only digest has no banner).
+2. **`TA_OPEN_EVERY_DIGEST=1`** — open every 5m when flat from **5m score sign** (see mode C above).
+3. **Lower** `TA_LONG_ENTRY_SCORE` / raise `TA_SHORT_ENTRY_SCORE` (e.g. **0.5** / **-0.5**) so “mildly” bullish/bearish mean scores qualify.
+
 ### Entry mode A — mean TA score (default when Gemini off)
 
 - **LONG** if mean TF score ≥ `TA_LONG_ENTRY_SCORE` (default **0.8**)
@@ -103,6 +115,7 @@ pm2 logs eth-ta-telegram
 | `TA_SIGNAL_ALERTS` | `1` | BULLISH/BEARISH banner when many TFs align |
 | `TA_DIGEST_5M_ONLY` | `0` | `1` = only 5m TA in digest |
 | `TA_OPEN_EVERY_DIGEST` | `0` | `1` = open when flat each cycle; 5m score sign; fixed TP/SL % |
+| `TA_ENTRY_ON_SIGNAL_BANNER` | `0` | `1` = open when 📌 BULLISH/BEARISH banner fires (full digest only); fixed % TP/SL |
 | `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | Fixed TP/SL % on price (with open-every or `TA_USE_FIXED_TP_SL_PCT`) |
 | `TA_USE_FIXED_TP_SL_PCT` | `0` | `1` = use fixed % TP/SL with **mean-score** thresholds (not “every digest”) |
 

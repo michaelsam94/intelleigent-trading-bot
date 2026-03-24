@@ -120,7 +120,7 @@ module.exports = {
     {
       name: "eth-ta-telegram",
       script: python,
-      // TA digest → Telegram; optional TA_TRADE_SIM=1 paper trades ($10/20x/ATR TP-SL/fees) in data/ta_sim/ (see docs/ETH_TA_TELEGRAM.md)
+      // TA digest → Telegram; optional TA_TRADE_SIM=1 paper trades ($10/20x/ATR TP-SL/fees) in data/ta_sim/; TA_ENTRY_ON_SIGNAL_BANNER=1 aligns opens with 📌 BULLISH/BEARISH banner (see docs/ETH_TA_TELEGRAM.md)
       args: ["-u", "scripts/eth_ta_telegram.py"],
       interpreter: "none",
       cwd: projectRoot,
