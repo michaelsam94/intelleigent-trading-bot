@@ -24,11 +24,16 @@ Env (TA trade sim — set TA_TRADE_SIM=1):
   TA_SHORT_ENTRY_SCORE=-0.8    # mean TF score <= this → open SHORT
   TA_MIN_BARS_BETWEEN_TRADES=1 # 5m bars after a close before new entry
   TA_STATE_DIR=data/ta_sim     # isolated from ML trader position.json
-  TA_RESET_BALANCE_ON_RESTART=1  # same effect as TA_RESET_ON_START: reset $ and position when process starts
+  TA_RESET_BALANCE_ON_RESTART=1  # reset balance, position, stats on process start
 
-  TA_USE_GEMINI=1                # entries from Gemini (full TA in prompt); no Gemini calls while position open
+  TA_OPEN_EVERY_DIGEST=1       # one new trade each digest when flat; direction from 5m TA score (>=0 LONG else SHORT)
+  TA_DIGEST_5M_ONLY=1          # only 5m TA in Telegram/API (lighter)
+  TA_TP_PRICE_PCT=5            # fixed TP % on underlying price (with TA_OPEN_EVERY_DIGEST or TA_USE_FIXED_TP_SL_PCT)
+  TA_SL_PRICE_PCT=3            # fixed SL % on underlying price
+
+  TA_USE_GEMINI=1              # disabled when TA_OPEN_EVERY_DIGEST=1
   GEMINI_API_KEY=...
-  GEMINI_MODEL=gemini-2.0-flash
+  GEMINI_MODEL=gemini-1.5-flash
 """
 from __future__ import annotations
 
@@ -247,20 +252,26 @@ class TASnapshot:
     tf_scores: list[float]
     tf_labels: list[str]
     mean_score: float
+    score_5m: float  # first TF in list (5m) — used for direction when TA_OPEN_EVERY_DIGEST=1
     df_5m: pd.DataFrame | None
 
 
 def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     client = _client()
-    frames = [
-        ("5m", "5 Min"),
-        ("15m", "15 Min"),
-        ("30m", "30 Min"),
-        ("1h", "Hourly"),
-        ("1d", "Daily"),
-        ("1w", "Weekly"),
-        ("1M", "Monthly"),
-    ]
+    digest_5m_only = os.environ.get("TA_DIGEST_5M_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+    frames = (
+        [("5m", "5 Min")]
+        if digest_5m_only
+        else [
+            ("5m", "5 Min"),
+            ("15m", "15 Min"),
+            ("30m", "30 Min"),
+            ("1h", "Hourly"),
+            ("1d", "Daily"),
+            ("1w", "Weekly"),
+            ("1M", "Monthly"),
+        ]
+    )
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines.append(f"📊 TA digest — {symbol} (Binance spot)")
@@ -294,30 +305,32 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             lines.append(f"  {k}: {det[k]}")
         lines.append("")
 
-    try:
-        kl_d = client.get_klines(symbol=symbol, interval="1d", limit=5)
-        if len(kl_d) >= 2:
-            ddf = _klines_to_df(kl_d)
-            prev = ddf.iloc[-2]
-            pv = _pivot_classic(prev)
-            lines.append("── Pivot (Classic, prev daily) ──")
-            for k in ("R3", "R2", "R1", "P", "S1", "S2", "S3"):
-                lines.append(f"  {k}: {pv[k]:,.2f}")
+    if not digest_5m_only:
+        try:
+            kl_d = client.get_klines(symbol=symbol, interval="1d", limit=5)
+            if len(kl_d) >= 2:
+                ddf = _klines_to_df(kl_d)
+                prev = ddf.iloc[-2]
+                pv = _pivot_classic(prev)
+                lines.append("── Pivot (Classic, prev daily) ──")
+                for k in ("R3", "R2", "R1", "P", "S1", "S2", "S3"):
+                    lines.append(f"  {k}: {pv[k]:,.2f}")
+                lines.append("")
+        except Exception as e:
+            lines.append(f"Pivot: (skip {e})")
             lines.append("")
-    except Exception as e:
-        lines.append(f"Pivot: (skip {e})")
-        lines.append("")
 
     mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
+    score_5m = float(tf_scores[0]) if tf_scores else 0.0
     if tf_scores:
         overall = _tf_label(mean_score)
         lines.append(f"Summary (mean TF score): {overall}")
-        lines.append(f"TF labels: {', '.join(tf_labels)}")
+        lines.append(f"5m score: {score_5m:+.4f} | TF labels: {', '.join(tf_labels)}")
     else:
         overall = "N/A"
 
     signal_banner: str | None = None
-    if os.environ.get("TA_SIGNAL_ALERTS", "1").strip().lower() in ("1", "true", "yes", "on"):
+    if os.environ.get("TA_SIGNAL_ALERTS", "1").strip().lower() in ("1", "true", "yes", "on") and not digest_5m_only:
         strong_buy = sum(1 for x in tf_labels if x == "Strong Buy")
         strong_sell = sum(1 for x in tf_labels if x == "Strong Sell")
         buyish = sum(1 for x in tf_labels if x in ("Strong Buy", "Buy"))
@@ -334,6 +347,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         tf_scores=tf_scores,
         tf_labels=tf_labels,
         mean_score=mean_score,
+        score_5m=score_5m,
         df_5m=df_5m,
     )
 
@@ -352,6 +366,29 @@ def _pos_path(symbol: str) -> Path:
 
 def _bal_path(symbol: str) -> Path:
     return _ta_dir(symbol) / "balance.json"
+
+
+def _stats_path(symbol: str) -> Path:
+    return _ta_dir(symbol) / "stats.json"
+
+
+def _load_stats(symbol: str) -> dict[str, int]:
+    p = _stats_path(symbol)
+    if not p.is_file():
+        return {"wins": 0, "losses": 0}
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"wins": int(d.get("wins", 0)), "losses": int(d.get("losses", 0))}
+    except Exception:
+        return {"wins": 0, "losses": 0}
+
+
+def _save_stats(symbol: str, wins: int, losses: int) -> None:
+    p = _stats_path(symbol)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"wins": wins, "losses": losses}, f, indent=2)
 
 
 def _tx_path(symbol: str) -> Path:
@@ -440,6 +477,15 @@ def _bar_close_time_5m(df: pd.DataFrame):
     return pd.Timestamp(ts) + pd.Timedelta(minutes=5)
 
 
+def _tp_sl_fixed_price_pct(side: str, entry: float, tp_pct: float, sl_pct: float) -> tuple[float, float]:
+    """TP/SL as percent move on underlying price (e.g. +5% TP, -3% SL for LONG)."""
+    tpp = tp_pct / 100.0
+    slp = sl_pct / 100.0
+    if side == "LONG":
+        return entry * (1.0 + tpp), entry * (1.0 - slp)
+    return entry * (1.0 - tpp), entry * (1.0 + slp)
+
+
 def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     """Paper trade from mean TA score; TP/SL/fees same as ML trader_simulation defaults."""
     if snap.df_5m is None or len(snap.df_5m) < 60:
@@ -519,12 +565,23 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             res = "TP" if hit_tp else "SL"
             win = hit_tp
             emoji = "✅" if win else "❌"
+            st0 = _load_stats(symbol)
+            if win:
+                st0["wins"] += 1
+            else:
+                st0["losses"] += 1
+            _save_stats(symbol, st0["wins"], st0["losses"])
+            closed_n = st0["wins"] + st0["losses"]
+            accuracy_pct = 100.0 * st0["wins"] / closed_n if closed_n else 0.0
+
             _tx(
                 f"🔒 TA-SIM {side} closed ({emoji} {res})\n"
                 f"Entry: {entry:,.2f} → Exit: {exit_price:,.2f}\n"
                 f"Price P&L: {profit_pct:+.2f}% → Margin: {leveraged_pnl_pct:+.2f}% | Est. fee: ${fee_usd:.2f}\n"
                 f"Balance: ${balance_after:.2f} | Total return: {total_return_pct:+.1f}%\n"
-                f"Mean TA score at entry context: {snap.mean_score:+.2f}"
+                f"5m TA context (now): score {snap.score_5m:+.4f} | mean {snap.mean_score:+.4f}\n"
+                f"📊 Stats — Wins: {st0['wins']} | Losses: {st0['losses']} | Closed: {closed_n} | "
+                f"Accuracy: {accuracy_pct:.1f}% | Balance: ${balance_after:.2f}"
             )
         return
 
@@ -540,8 +597,21 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         except Exception:
             pass
 
-    # --- entry: Gemini (TA_USE_GEMINI) or mean TA score ---
-    use_gemini = os.environ.get("TA_USE_GEMINI", "0").strip().lower() in ("1", "true", "yes", "on")
+    # --- entry: TA_OPEN_EVERY_DIGEST (5m score) > Gemini > fixed% + mean > ATR + mean ---
+    open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
+    price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "5"))
+    price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "3"))
+    use_fixed_tp_sl = open_every or os.environ.get("TA_USE_FIXED_TP_SL_PCT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+    use_gemini = (
+        os.environ.get("TA_USE_GEMINI", "0").strip().lower() in ("1", "true", "yes", "on") and not open_every
+    )
+
     atr = _atr_from_df(df)
     if atr is None or atr <= 0:
         atr = close_price * (tp_pct + sl_pct) / 2.0
@@ -552,7 +622,15 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     open_extra: str = ""
     gemini_note = ""
 
-    if use_gemini:
+    if open_every:
+        sc5 = snap.score_5m
+        side = "LONG" if sc5 >= 0 else "SHORT"
+        tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
+        open_extra = (
+            f"5m TA score {sc5:+.4f} | open each digest when flat | "
+            f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
+        )
+    elif use_gemini:
         if not (os.environ.get("GEMINI_API_KEY") or "").strip():
             print("TA_USE_GEMINI=1 but GEMINI_API_KEY is empty", flush=True)
             return
@@ -579,7 +657,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         tp_v, sl_v = validate_tp_sl(action, close_price, tp_raw, sl_raw)
         if tp_v is not None and sl_v is not None:
             tp_price, sl_price = tp_v, sl_v
-            open_reason = "gemini_prices"
+            reason = "gemini_prices"
         else:
             if action == "LONG":
                 tp_price = close_price + atr * tp_mult
@@ -587,10 +665,21 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             else:
                 tp_price = close_price - atr * tp_mult
                 sl_price = close_price + atr * sl_mult
-            open_reason = "gemini_atr_fallback"
+            reason = "gemini_atr_fallback"
         gemini_note = (dec.get("rationale") or "")[:500]
         conf = dec.get("confidence", 0)
-        open_extra = f"Gemini conf={conf} | {open_reason}\n{gemini_note}" if gemini_note else f"Gemini conf={conf} | {open_reason}"
+        open_extra = f"Gemini conf={conf} | {reason}\n{gemini_note}" if gemini_note else f"Gemini conf={conf} | {reason}"
+    elif use_fixed_tp_sl:
+        ms = snap.mean_score
+        want_long = ms >= long_min
+        want_short = ms <= short_max
+        if not want_long and not want_short:
+            return
+        if want_long and want_short:
+            return
+        side = "LONG" if want_long else "SHORT"
+        tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
+        open_extra = f"Mean score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% (price)"
     else:
         ms = snap.mean_score
         want_long = ms >= long_min
@@ -603,12 +692,12 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             side = "LONG"
             tp_price = close_price + atr * tp_mult
             sl_price = close_price - atr * sl_mult
-            open_extra = f"Mean TA score {ms:+.2f}"
+            open_extra = f"Mean TA score {ms:+.2f} (ATR TP/SL)"
         else:
             side = "SHORT"
             tp_price = close_price - atr * tp_mult
             sl_price = close_price + atr * sl_mult
-            open_extra = f"Mean TA score {ms:+.2f}"
+            open_extra = f"Mean TA score {ms:+.2f} (ATR TP/SL)"
 
     pos_data = {
         "open": True,
@@ -624,13 +713,16 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     _save_position(symbol, pos_data)
     emoji = "📈" if side == "LONG" else "📉"
+    if open_every or (use_fixed_tp_sl and not use_gemini):
+        meta = f"Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
+    else:
+        meta = f"ATR(14)≈{atr:.4f} | Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
     _tx(
         f"{emoji} TA-SIM {side} opened\n"
         f"{open_extra}\n"
         f"Price: {close_price:,.2f}\n"
         f"TP: {tp_price:,.2f} | SL: {sl_price:,.2f}\n"
-        f"ATR(14)≈{atr:.4f} | Leverage {lev}x | Balance ${balance_before:.2f}\n"
-        f"Fees: {fee_bps} bps/side (open+close on notional, margin-style)"
+        f"{meta}"
     )
 
 
@@ -657,7 +749,11 @@ def main() -> int:
         st = float(os.environ.get("TA_STARTING_BALANCE", "10"))
         _save_balance(symbol, st, st)
         _clear_position(symbol)
-        print(f"TA reset on start: balance={st}, position cleared (TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)", flush=True)
+        _save_stats(symbol, 0, 0)
+        print(
+            f"TA reset on start: balance={st}, position + stats cleared (TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)",
+            flush=True,
+        )
 
     print(
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim}",

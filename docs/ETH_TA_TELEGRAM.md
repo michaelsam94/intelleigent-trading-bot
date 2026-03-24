@@ -9,7 +9,7 @@ Set **`TA_TRADE_SIM=1`** in `.env`.
 - **Starting balance:** `TA_STARTING_BALANCE` (default **$10**)
 - **Leverage:** `TA_LEVERAGE` (default **20**)
 - **Fees:** `TA_FEE_BPS_PER_SIDE` (default **4** bps/side); P&L matches `outputs/notifier_trades.py` margin-style math
-- **State (isolated from ML bot):** `data/ta_sim/<SYMBOL>/` — `position.json`, `balance.json`, `transactions_ta.txt`, `last_close.json`
+- **State (isolated from ML bot):** `data/ta_sim/<SYMBOL>/` — `position.json`, `balance.json`, `transactions_ta.txt`, `last_close.json`, **`stats.json`** (wins/losses for accuracy)
 
 ### Reset balance on restart
 
@@ -18,7 +18,22 @@ Set either:
 - `TA_RESET_ON_START=1`, or  
 - `TA_RESET_BALANCE_ON_RESTART=1`  
 
-to reset balance to `TA_STARTING_BALANCE` and clear the open position when the process starts (e.g. after `pm2 restart`).
+to reset balance to `TA_STARTING_BALANCE`, clear the open position, and **reset `stats.json`** when the process starts (e.g. after `pm2 restart`).
+
+### Entry mode C — one signal per digest (5m TA) + fixed TP/SL (`TA_OPEN_EVERY_DIGEST=1`)
+
+Use this when you want **a new paper trade on every 5m cycle** while **flat** (no overlapping positions):
+
+1. Set **`TA_OPEN_EVERY_DIGEST=1`** (implies **Gemini is not used** for entries).
+2. **Direction** from **5m TA score** only: **LONG** if score ≥ 0, else **SHORT**.
+3. **TP / SL** as **fixed % moves on the underlying price** (not ATR):
+   - Defaults: **`TA_TP_PRICE_PCT=5`**, **`TA_SL_PRICE_PCT=3`**
+   - LONG: TP = entry × (1 + 5%), SL = entry × (1 − 3%)
+   - SHORT: TP = entry × (1 − 5%), SL = entry × (1 + 3%)
+4. **`TA_DIGEST_5M_ONLY=1`** — only compute/send **5m** TA (recommended with this mode).
+5. After each **close**, Telegram (or logs) includes **wins, losses, closed count, win rate (accuracy %), balance**.
+
+There is still **no new entry while a position is open**; after TP/SL, **`TA_MIN_BARS_BETWEEN_TRADES`** (default **1** five-minute bar) must pass before the next open.
 
 ### Entry mode A — mean TA score (default when Gemini off)
 
@@ -37,7 +52,21 @@ to reset balance to `TA_STARTING_BALANCE` and clear the open position when the p
 
 Telegram messages for opens/closes require `TELEGRAM_BOT_TOKEN` + recipients; otherwise PM2 logs only.
 
-### Example `.env`
+### Example `.env` — one open per 5m digest + 5% / 3% TP/SL
+
+```bash
+TA_TRADE_SIM=1
+TA_OPEN_EVERY_DIGEST=1
+TA_DIGEST_5M_ONLY=1
+TA_TP_PRICE_PCT=5
+TA_SL_PRICE_PCT=3
+TA_STARTING_BALANCE=10
+TA_LEVERAGE=20
+TA_FEE_BPS_PER_SIDE=4
+TA_RESET_BALANCE_ON_RESTART=1
+```
+
+### Example `.env` — classic mean-score + ATR
 
 ```bash
 TA_TRADE_SIM=1
@@ -48,7 +77,7 @@ TA_TP_ATR_MULT=4.0
 TA_SL_ATR_MULT=2.5
 TA_RESET_BALANCE_ON_RESTART=1
 
-# Gemini entries (optional)
+# Gemini entries (optional; not used with TA_OPEN_EVERY_DIGEST=1)
 TA_USE_GEMINI=1
 GEMINI_API_KEY=your_key
 GEMINI_MODEL=gemini-1.5-flash
@@ -72,12 +101,16 @@ pm2 logs eth-ta-telegram
 | `TA_INTERVAL_SEC` | `300` | Loop interval (5 min) |
 | `TA_KLINES_LIMIT` | `500` | Bars per TF |
 | `TA_SIGNAL_ALERTS` | `1` | BULLISH/BEARISH banner when many TFs align |
+| `TA_DIGEST_5M_ONLY` | `0` | `1` = only 5m TA in digest |
+| `TA_OPEN_EVERY_DIGEST` | `0` | `1` = open when flat each cycle; 5m score sign; fixed TP/SL % |
+| `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | Fixed TP/SL % on price (with open-every or `TA_USE_FIXED_TP_SL_PCT`) |
+| `TA_USE_FIXED_TP_SL_PCT` | `0` | `1` = use fixed % TP/SL with **mean-score** thresholds (not “every digest”) |
 
 ## ML trading vs TA-sim
 
 | | `server-*` (ML) | `eth-ta-telegram` + `TA_TRADE_SIM` |
 |--|-----------------|-------------------------------------|
-| Signal | `trade_score` + thresholds | Mean TA score **or** Gemini JSON |
+| Signal | `trade_score` + thresholds | Mean score, **Gemini**, or **5m score** (`TA_OPEN_EVERY_DIGEST`) |
 | State | `data/<SYMBOL>/` | `data/ta_sim/<SYMBOL>/` |
 
 ## Implementation notes
