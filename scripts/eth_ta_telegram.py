@@ -40,6 +40,17 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
 
   TA_ENTRY_ON_SIGNAL_BANNER=0  # if 1: open LONG/SHORT when 📌 BULLISH/BEARISH banner fires (same TP%/SL% as open-every); falls back to Gemini/mean if no banner
   TA_SIGNAL_ON_5M=1           # if 1 (default): 📌 banner + mean-score/Gemini entries use 5m TF score/label, not mean TF score; set 0 for legacy mean-TF behavior
+
+  TA_SIGNAL_FILTERS=0         # 1=stricter TA-SIM entries: score band, ADX+MACD, 15m/1h trend (see docs)
+  TA_SF_SCORE_FILTER=1        # 5m score band (with TA_SF_LONG_MIN / TA_SF_SHORT_MAX)
+  TA_SF_LONG_MIN=2.0          # LONG only if 5m score >= this
+  TA_SF_SHORT_MAX=-2.0        # SHORT only if 5m score <= this
+  TA_SF_TREND_FILTER=1        # ADX + MACD alignment on 5m
+  TA_SF_ADX_MIN=20            # set -1 to skip ADX check only
+  TA_SF_MACD_ALIGN=1          # LONG: MACD hist > 0; SHORT: < 0
+  TA_SF_HTF_FILTER=1          # skip LONG if 15m/1h bearish; skip SHORT if bullish
+  TA_SF_HT_BEARISH_MAX=-0.5   # HTF score at/below = bearish (blocks LONG)
+  TA_SF_HT_BULLISH_MIN=0.5    # HTF score at/above = bullish (blocks SHORT)
 """
 from __future__ import annotations
 
@@ -47,7 +58,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -186,6 +197,15 @@ def _gemini_entries_env_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _signal_filters_enabled() -> bool:
+    """Stricter TA-SIM entry gates (score band, ADX/MACD, higher-TF trend)."""
+    return os.environ.get("TA_SIGNAL_FILTERS", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _sf_sub(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _tf_label(score: float) -> str:
     if score >= 2.5:
         return "Strong Buy"
@@ -318,6 +338,17 @@ def _analyze_ohlcv(df: pd.DataFrame) -> tuple[float, dict[str, str]]:
     return score, details
 
 
+def _adx_macd_from_df(df: pd.DataFrame) -> tuple[float | None, float | None]:
+    close = df["close"].values.astype(float)
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    if len(close) < 60:
+        return None, None
+    adx = _last(talib.ADX(high, low, close, timeperiod=14))
+    _m, _s, hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+    return adx, _last(hist)
+
+
 def _pivot_classic(prev: pd.Series) -> dict[str, float]:
     h, l, c = float(prev["high"]), float(prev["low"]), float(prev["close"])
     pp = (h + l + c) / 3.0
@@ -342,6 +373,7 @@ class TASnapshot:
     entry_score_kind: str  # "5m" or "mean"
     label_5m: str  # _tf_label(score_5m) string e.g. Buy, Neutral
     df_5m: pd.DataFrame | None
+    htf_scores: dict[str, float] = field(default_factory=dict)  # 15m / 1h TF scores for entry filters
 
 
 def build_snapshot(symbol: str, limit: int) -> TASnapshot:
@@ -408,6 +440,21 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             lines.append(f"Pivot: (skip {e})")
             lines.append("")
 
+    htf_scores: dict[str, float] = {}
+    if not digest_5m_only and len(tf_scores) >= 4:
+        htf_scores["15m"] = float(tf_scores[1])
+        htf_scores["1h"] = float(tf_scores[3])
+    elif digest_5m_only and _signal_filters_enabled():
+        for interval, key in (("15m", "15m"), ("1h", "1h")):
+            try:
+                kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+                if kl and len(kl) >= 60:
+                    dfx = _klines_to_df(kl)
+                    sc, _ = _analyze_ohlcv(dfx)
+                    htf_scores[key] = float(sc)
+            except Exception:
+                pass
+
     mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
     score_5m = float(tf_scores[0]) if tf_scores else 0.0
     label_5m = tf_labels[0] if tf_labels else "N/A"
@@ -420,6 +467,15 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         lines.append(f"5m score: {score_5m:+.4f} | TF labels: {', '.join(tf_labels)}")
         if use_5m_signal:
             lines.append(f"Entry signal (5m TF): {label_5m} (score {score_5m:+.4f})")
+        if _signal_filters_enabled():
+            lines.append(
+                "TA_SIGNAL_FILTERS: ON — paper-trade entries require score band, ADX+MACD, 15m/1h trend (see docs)"
+            )
+            if htf_scores:
+                lines.append(
+                    f"HTF for filters: 15m {htf_scores.get('15m', float('nan')):+.4f} | "
+                    f"1h {htf_scores.get('1h', float('nan')):+.4f}"
+                )
     else:
         overall = "N/A"
 
@@ -453,6 +509,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         entry_score_kind=entry_score_kind,
         label_5m=label_5m,
         df_5m=df_5m,
+        htf_scores=htf_scores,
     )
 
 
@@ -614,6 +671,60 @@ def _tp_sl_fixed_margin_pct(side: str, entry: float, tp_margin_pct: float, sl_ma
     if side == "LONG":
         return entry * (1.0 + tp_move), entry * (1.0 - sl_move)
     return entry * (1.0 - tp_move), entry * (1.0 + sl_move)
+
+
+def _entry_filters_pass(snap: TASnapshot, side: str, df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Optional stricter gates when TA_SIGNAL_FILTERS=1.
+    Returns (True, "") to allow entry, or (False, reason) to skip.
+    """
+    if not _signal_filters_enabled():
+        return True, ""
+
+    if _sf_sub("TA_SF_SCORE_FILTER", "1"):
+        long_min = float(os.environ.get("TA_SF_LONG_MIN", "2.0"))
+        short_max = float(os.environ.get("TA_SF_SHORT_MAX", "-2.0"))
+        if side == "LONG" and snap.score_5m < long_min:
+            return False, f"5m score {snap.score_5m:+.4f} < TA_SF_LONG_MIN ({long_min})"
+        if side == "SHORT" and snap.score_5m > short_max:
+            return False, f"5m score {snap.score_5m:+.4f} > TA_SF_SHORT_MAX ({short_max})"
+
+    if _sf_sub("TA_SF_TREND_FILTER", "1"):
+        adx_min = float(os.environ.get("TA_SF_ADX_MIN", "20"))
+        adx, mhist = _adx_macd_from_df(df)
+        if adx_min >= 0:
+            if adx is None:
+                return False, "ADX unavailable"
+            if adx < adx_min:
+                return False, f"ADX {adx:.1f} < TA_SF_ADX_MIN ({adx_min})"
+        if _sf_sub("TA_SF_MACD_ALIGN", "1"):
+            if mhist is None:
+                return False, "MACD histogram unavailable"
+            if side == "LONG" and mhist <= 0:
+                return False, f"MACD hist {mhist:.6f} not bullish (≤0)"
+            if side == "SHORT" and mhist >= 0:
+                return False, f"MACD hist {mhist:.6f} not bearish (≥0)"
+
+    if _sf_sub("TA_SF_HTF_FILTER", "1"):
+        h = snap.htf_scores
+        if not h or "15m" not in h or "1h" not in h:
+            return True, ""
+        s15 = h["15m"]
+        s1h = h["1h"]
+        bearish_max = float(os.environ.get("TA_SF_HT_BEARISH_MAX", "-0.5"))
+        bullish_min = float(os.environ.get("TA_SF_HT_BULLISH_MIN", "0.5"))
+        if side == "LONG" and (s15 <= bearish_max or s1h <= bearish_max):
+            return (
+                False,
+                f"HTF bearish vs LONG: 15m={s15:+.2f} 1h={s1h:+.2f} (≤ {bearish_max})",
+            )
+        if side == "SHORT" and (s15 >= bullish_min or s1h >= bullish_min):
+            return (
+                False,
+                f"HTF bullish vs SHORT: 15m={s15:+.2f} 1h={s1h:+.2f} (≥ {bullish_min})",
+            )
+
+    return True, ""
 
 
 def _fixed_tp_sl_levels(
@@ -886,6 +997,11 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             open_extra = f"{es} TA score {ms:+.2f} (ATR TP/SL)"
 
     if not side:
+        return
+
+    ok, skip_reason = _entry_filters_pass(snap, side, df)
+    if not ok:
+        print(f"TA-SIM entry skipped: {skip_reason}", flush=True)
         return
 
     pos_data = {

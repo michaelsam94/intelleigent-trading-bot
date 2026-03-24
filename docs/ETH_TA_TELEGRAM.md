@@ -43,6 +43,23 @@ Use this when you want **a new paper trade on every 5m cycle** while **flat** (n
 
 There is still **no new entry while a position is open**; after TP/SL, **`TA_MIN_BARS_BETWEEN_TRADES`** (default **1** five-minute bar) must pass before the next open.
 
+### Entry quality filters (`TA_SIGNAL_FILTERS`)
+
+Set **`TA_SIGNAL_FILTERS=1`** to require **all enabled** checks below before a TA-SIM **open** (skipped entries are logged to PM2 as `TA-SIM entry skipped: …`):
+
+| Sub-filter | Env | Default | Behavior |
+|------------|-----|---------|----------|
+| **5m score band** | `TA_SF_SCORE_FILTER` | `1` | **LONG** only if **5m score ≥ `TA_SF_LONG_MIN`** (default **2.0**); **SHORT** only if **≤ `TA_SF_SHORT_MAX`** (default **-2.0**). |
+| **Trend on 5m** | `TA_SF_TREND_FILTER` | `1` | **ADX(14) ≥ `TA_SF_ADX_MIN`** (default **20**). Set **`TA_SF_ADX_MIN=-1`** to disable the ADX check only. |
+| **MACD vs direction** | `TA_SF_MACD_ALIGN` | `1` | **LONG** requires MACD histogram **> 0**; **SHORT** requires **< 0**. Set **`TA_SF_MACD_ALIGN=0`** to skip. |
+| **Higher TF vs counter-trend** | `TA_SF_HTF_FILTER` | `1` | **Skip LONG** if **15m or 1h** TF score **≤ `TA_SF_HT_BEARISH_MAX`** (default **-0.5**). **Skip SHORT** if either score **≥ `TA_SF_HT_BULLISH_MIN`** (default **0.5**). If 15m/1h scores are unavailable, HTF checks are skipped (entry allowed). |
+
+With **`TA_DIGEST_5M_ONLY=1`**, the script **extra-fetches** 15m and 1h klines when **`TA_SIGNAL_FILTERS=1`** so HTF filters work.
+
+**Tighter stops at high leverage:** margin-based SL (**`TA_TP_SL_MARGIN_PCT=1`**) can still be noisy on ETH; widen **`TA_SL_PRICE_PCT`** (margin %) or lower **`TA_LEVERAGE`** (e.g. **10**).
+
+**Fees:** TA-SIM uses **`TA_FEE_BPS_PER_SIDE`** on notional; real exchanges often charge less with maker limits or VIP tiers — this bot does not simulate limit orders; reduce **`TA_FEE_BPS_PER_SIDE`** in `.env` to stress-test “lower fee” outcomes.
+
 ### 5m vs mean TF for signals (`TA_SIGNAL_ON_5M`, default **on**)
 
 By default (**`TA_SIGNAL_ON_5M=1`**):
@@ -154,6 +171,10 @@ pm2 logs eth-ta-telegram
 | `TA_ENTRY_ON_SIGNAL_BANNER` | `0` | `1` = open when 📌 BULLISH/BEARISH banner fires (full digest only); fixed % TP/SL |
 | `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | With fixed TP/SL: **margin** % if `TA_TP_SL_MARGIN_PCT=1`, else **underlying** % |
 | `TA_TP_SL_MARGIN_PCT` | `1` | `1` = `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` are **margin** targets (price move ÷ leverage); `0` = **spot** % |
+| `TA_SIGNAL_FILTERS` | `0` | `1` = stricter TA-SIM entries (score band, ADX/MACD, 15m/1h); see section above |
+| `TA_SF_LONG_MIN` / `TA_SF_SHORT_MAX` | `2.0` / `-2.0` | 5m score limits when `TA_SF_SCORE_FILTER=1` |
+| `TA_SF_ADX_MIN` | `20` | Min ADX on 5m; **`-1`** disables ADX check |
+| `TA_SF_HT_BEARISH_MAX` / `TA_SF_HT_BULLISH_MIN` | `-0.5` / `0.5` | HTF thresholds for blocking LONG / SHORT |
 | `TA_USE_FIXED_TP_SL_PCT` | `0` | `1` = fixed % TP/SL with score thresholds (5m or mean per `TA_SIGNAL_ON_5M`) |
 | `TA_USE_GEMINI` | `0` | `1` = Gemini for entries when flat; `0` = TA score only (see **`TA_GEMINI_ENABLED`** alias above) |
 | `TA_GEMINI_ENABLED` | — | Alias for **`TA_USE_GEMINI`** when **`TA_USE_GEMINI`** is unset |
