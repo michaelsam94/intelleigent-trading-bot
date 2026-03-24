@@ -34,10 +34,10 @@ Use this when you want **a new paper trade on every 5m cycle** while **flat** (n
 
 1. Set **`TA_OPEN_EVERY_DIGEST=1`** (implies **Gemini is not used** for entries).
 2. **Direction** from **5m TA score** only: **LONG** if score ≥ 0, else **SHORT**.
-3. **TP / SL** as **fixed % moves on the underlying price** (not ATR):
-   - Defaults: **`TA_TP_PRICE_PCT=5`**, **`TA_SL_PRICE_PCT=3`**
-   - LONG: TP = entry × (1 + 5%), SL = entry × (1 − 3%)
-   - SHORT: TP = entry × (1 − 5%), SL = entry × (1 + 3%)
+3. **TP / SL** as fixed **%** (not ATR). By default (**`TA_TP_SL_MARGIN_PCT=1`**) those percents are **margin return** targets (same model as closes: margin return ≈ price move × leverage):
+   - Defaults: **`TA_TP_PRICE_PCT=5`**, **`TA_SL_PRICE_PCT=3`** → e.g. **+5% / −3% on margin**; ETH **price** move ≈ **5/L**% / **3/L**% with leverage **L** (`TA_LEVERAGE`, default **20**).
+   - SHORT example @ 20x: SL is about **+0.15%** ETH above entry (≈ **−3%** on margin), not **+3%** on spot.
+   - Set **`TA_TP_SL_MARGIN_PCT=0`** for legacy behavior: **5% / 3%** on **underlying price** (wide stops on high leverage).
 4. **`TA_DIGEST_5M_ONLY=1`** — only compute/send **5m** TA (recommended with this mode).
 5. After each **close**, Telegram (or logs) includes **wins, losses, closed count, win rate (accuracy %), balance**.
 
@@ -152,7 +152,8 @@ pm2 logs eth-ta-telegram
 | `TA_DIGEST_5M_ONLY` | `0` | `1` = only 5m TA in digest |
 | `TA_OPEN_EVERY_DIGEST` | `0` | `1` = open when flat each cycle; 5m score sign; fixed TP/SL % |
 | `TA_ENTRY_ON_SIGNAL_BANNER` | `0` | `1` = open when 📌 BULLISH/BEARISH banner fires (full digest only); fixed % TP/SL |
-| `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | Fixed TP/SL % on price (with open-every or `TA_USE_FIXED_TP_SL_PCT`) |
+| `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | With fixed TP/SL: **margin** % if `TA_TP_SL_MARGIN_PCT=1`, else **underlying** % |
+| `TA_TP_SL_MARGIN_PCT` | `1` | `1` = `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` are **margin** targets (price move ÷ leverage); `0` = **spot** % |
 | `TA_USE_FIXED_TP_SL_PCT` | `0` | `1` = fixed % TP/SL with score thresholds (5m or mean per `TA_SIGNAL_ON_5M`) |
 | `TA_USE_GEMINI` | `0` | `1` = Gemini for entries when flat; `0` = TA score only (see **`TA_GEMINI_ENABLED`** alias above) |
 | `TA_GEMINI_ENABLED` | — | Alias for **`TA_USE_GEMINI`** when **`TA_USE_GEMINI`** is unset |

@@ -29,8 +29,9 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
 
   TA_OPEN_EVERY_DIGEST=1       # one new trade each digest when flat; direction from 5m TA score (>=0 LONG else SHORT)
   TA_DIGEST_5M_ONLY=1          # only 5m TA in Telegram/API (lighter)
-  TA_TP_PRICE_PCT=5            # fixed TP % on underlying price (with TA_OPEN_EVERY_DIGEST or TA_USE_FIXED_TP_SL_PCT)
-  TA_SL_PRICE_PCT=3            # fixed SL % on underlying price
+  TA_TP_PRICE_PCT=5            # fixed TP % (margin or underlying — see TA_TP_SL_MARGIN_PCT)
+  TA_SL_PRICE_PCT=3            # fixed SL %
+  TA_TP_SL_MARGIN_PCT=1        # 1=TP/SL % are margin P&L (÷ leverage → price); 0=underlying price %
 
   TA_USE_GEMINI=0              # 1=enable Gemini for entries; 0=disable (TA score only). Alias: TA_GEMINI_ENABLED
   TA_GEMINI_ENABLED=0          # if TA_USE_GEMINI unset, same meaning as TA_USE_GEMINI
@@ -601,6 +602,32 @@ def _tp_sl_fixed_price_pct(side: str, entry: float, tp_pct: float, sl_pct: float
     return entry * (1.0 - tpp), entry * (1.0 + slp)
 
 
+def _tp_sl_fixed_margin_pct(side: str, entry: float, tp_margin_pct: float, sl_margin_pct: float, lev: float) -> tuple[float, float]:
+    """
+    TP/SL so that ~tp_margin_pct / sl_margin_pct is the target margin P&L% at fill
+    (same fee model as close: leveraged_pnl_pct ≈ price_move_pct * lev).
+    Price move fraction = margin_pct / lev / 100.
+    """
+    lv = max(lev, 1e-9)
+    tp_move = (tp_margin_pct / lv) / 100.0
+    sl_move = (sl_margin_pct / lv) / 100.0
+    if side == "LONG":
+        return entry * (1.0 + tp_move), entry * (1.0 - sl_move)
+    return entry * (1.0 - tp_move), entry * (1.0 + sl_move)
+
+
+def _fixed_tp_sl_levels(
+    side: str, entry: float, tp_pct: float, sl_pct: float, lev: float
+) -> tuple[float, float, str]:
+    """Returns (tp_price, sl_price, mode_label) for Telegram copy."""
+    use_margin = os.environ.get("TA_TP_SL_MARGIN_PCT", "1").strip().lower() in ("1", "true", "yes", "on")
+    if use_margin:
+        tp_p, sl_p = _tp_sl_fixed_margin_pct(side, entry, tp_pct, sl_pct, lev)
+        return tp_p, sl_p, "margin"
+    tp_p, sl_p = _tp_sl_fixed_price_pct(side, entry, tp_pct, sl_pct)
+    return tp_p, sl_p, "underlying"
+
+
 def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     """Paper trade from mean TA score; TP/SL/fees same as ML trader_simulation defaults."""
     if snap.df_5m is None or len(snap.df_5m) < 60:
@@ -746,21 +773,29 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     if open_every:
         sc5 = snap.score_5m
         side = "LONG" if sc5 >= 0 else "SHORT"
-        tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
-        open_extra = (
-            f"5m TA score {sc5:+.4f} | open each digest when flat | "
-            f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
-        )
+        tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev)
+        if _tp_sl_mode == "margin":
+            tp_sl_txt = (
+                f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
+                f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
+            )
+        else:
+            tp_sl_txt = f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
+        open_extra = f"5m TA score {sc5:+.4f} | open each digest when flat | {tp_sl_txt}"
     elif entry_on_banner and not open_every:
         bs = _banner_entry_side(snap.banner)
         if bs:
             side = bs
             opened_from_banner = True
-            tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
-            open_extra = (
-                f"Multi-TF banner entry ({snap.banner}) | "
-                f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
-            )
+            tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev)
+            if _tp_sl_mode == "margin":
+                tp_sl_txt = (
+                    f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
+                    f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
+                )
+            else:
+                tp_sl_txt = f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
+            open_extra = f"Multi-TF banner entry ({snap.banner}) | {tp_sl_txt}"
 
     if not side and use_gemini:
         gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
@@ -822,8 +857,14 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         if want_long and want_short:
             return
         side = "LONG" if want_long else "SHORT"
-        tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
-        open_extra = f"{es} score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% (price)"
+        tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev)
+        if _tp_sl_mode == "margin":
+            open_extra = (
+                f"{es} score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% margin "
+                f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH @ {lev}x)"
+            )
+        else:
+            open_extra = f"{es} score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% (underlying)"
     elif not side:
         ms = snap.score_for_entry
         es = "5m" if snap.entry_score_kind == "5m" else "mean TF"
