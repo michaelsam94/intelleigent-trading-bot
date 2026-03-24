@@ -13,7 +13,7 @@ Env (digest):
   TELEGRAM_BOT_TOKEN=...
 
 Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
-  TA_TRADE_SIM=1              # or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED if TA_TRADE_SIM unset/empty
+  TA_TRADE_SIM=1              # or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED; script merges project .env on startup
   TA_STARTING_BALANCE=10
   TA_LEVERAGE=20
   TA_FEE_BPS_PER_SIDE=4
@@ -56,6 +56,32 @@ import pandas as pd
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+
+def _load_project_dotenv() -> None:
+    """Merge project root .env into os.environ (overwrites). Same line rules as ecosystem.config.cjs."""
+    p = _ROOT / ".env"
+    if not p.is_file():
+        return
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if raw.startswith("\ufeff"):
+        raw = raw[1:]
+    for line in raw.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        eq = line.index("=")
+        key = line[:eq].strip()
+        val = line[eq + 1 :].strip()
+        if val.startswith('"') and val.endswith('"'):
+            val = val[1:-1].replace('\\"', '"')
+        elif val.startswith("'") and val.endswith("'"):
+            val = val[1:-1].replace("\\'", "'")
+        if key:
+            os.environ[key] = val
 
 import talib
 
@@ -849,6 +875,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
 
 def main() -> int:
+    _load_project_dotenv()
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     trade_sim = _ta_trade_sim_enabled()
 

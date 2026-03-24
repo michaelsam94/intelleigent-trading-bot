@@ -4,7 +4,7 @@ PM2 app **`eth-ta-telegram`** runs `scripts/eth_ta_telegram.py`: it pulls **Bina
 
 ## TA paper trading
 
-Set **`TA_TRADE_SIM=1`** in **the project root `.env`** (same folder as `ecosystem.config.cjs`) and restart PM2 with **`pm2 restart eth-ta-telegram --update-env`**.
+Set **`TA_TRADE_SIM=1`** in **the project root `.env`** (same folder as `ecosystem.config.cjs`). On startup, **`eth_ta_telegram.py` merges that file into the process environment** (overrides PM2/shell when keys are present), so paper trading can turn on even if PM2 did not pass variables correctly. Still restart after editing: **`pm2 restart eth-ta-telegram --update-env`**.
 
 **Aliases:** **`TA_TRADE_SIM_ENABLED=1`** or **`TA_TRADE_ENABLED=1`** apply if **`TA_TRADE_SIM`** is missing or blank (same pattern as Gemini flags). Use **`TA_TRADE_SIM=1`** to avoid ambiguity.
 
