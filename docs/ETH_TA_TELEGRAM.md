@@ -161,6 +161,7 @@ pm2 logs eth-ta-telegram
 | `TA_TRADE_SIM_ENABLED` | — | Same as **`TA_TRADE_SIM`** when **`TA_TRADE_SIM`** is unset or empty |
 | `TA_TRADE_ENABLED` | — | Same as above (alternate name); do not confuse with **`TA_TRADE_SIM`** |
 | `TA_SUPPRESS_TRADE_SIM_DIGEST_HINT` | `0` | **`1`** = do not append “TA paper trading is OFF” footer when `TA_TRADE_SIM=0` |
+| `TA_STARTUP_TELEGRAM` | `1` | **`1`** = send one **“service started”** message on each process start (e.g. `pm2 restart`); **`0`** = skip |
 | `TA_SYMBOL` | `ETHUSDC` | Binance **spot** symbol |
 | `TA_INTERVAL_SEC` | `300` | Loop interval (5 min) |
 | `TA_KLINES_LIMIT` | `500` | Bars per TF |

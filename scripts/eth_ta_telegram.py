@@ -51,6 +51,8 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_SF_HTF_FILTER=1          # skip LONG if 15m/1h bearish; skip SHORT if bullish
   TA_SF_HT_BEARISH_MAX=-0.5   # HTF score at/below = bearish (blocks LONG)
   TA_SF_HT_BULLISH_MIN=0.5    # HTF score at/above = bullish (blocks SHORT)
+
+  TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
 """
 from __future__ import annotations
 
@@ -1079,6 +1081,30 @@ def main() -> int:
             "If it stays off, run: pm2 delete eth-ta-telegram && pm2 start ecosystem.config.cjs --only eth-ta-telegram",
             flush=True,
         )
+
+    if (
+        os.environ.get("TA_STARTUP_TELEGRAM", "1").strip().lower() in ("1", "true", "yes", "on")
+        and token
+        and recipient_chat_ids({})
+    ):
+        now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        st_bal = float(os.environ.get("TA_STARTING_BALANCE", "10"))
+        reset_line = ""
+        if reset_env:
+            reset_line = f"\nReset on start: balance/position/stats cleared → ${st_bal:.2f} start."
+        startup_msg = (
+            "🟢 eth-ta-telegram started\n"
+            f"As of {now_s}\n"
+            f"Symbol: {symbol} | Loop: {interval_sec}s\n"
+            f"TA_TRADE_SIM={trade_sim} | Gemini entries={_gemini_entries_env_enabled()} | "
+            f"TA_SIGNAL_FILTERS={_signal_filters_enabled()}"
+            f"{reset_line}"
+        )
+        try:
+            n0 = broadcast_telegram_plain(token, startup_msg, {})
+            print(f"Startup Telegram sent to {n0} chat(s)", flush=True)
+        except Exception as e:
+            print(f"Startup Telegram failed: {e}", file=sys.stderr, flush=True)
 
     while True:
         try:
