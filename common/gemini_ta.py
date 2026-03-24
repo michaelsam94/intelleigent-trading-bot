@@ -46,7 +46,15 @@ Rules:
 - If data is conflicting or choppy, prefer HOLD."""
 
 
-def build_user_prompt(symbol: str, ta_digest_text: str, tf_scores: list[float], tf_labels: list[str], mean_score: float) -> str:
+def build_user_prompt(
+    symbol: str,
+    ta_digest_text: str,
+    tf_scores: list[float],
+    tf_labels: list[str],
+    aggregate_score: float,
+    *,
+    aggregate_score_label: str = "Mean score",
+) -> str:
     scores_line = ", ".join(f"{s:+.3f}" for s in tf_scores) if tf_scores else "n/a"
     labels_line = ", ".join(tf_labels) if tf_labels else "n/a"
     return f"""=== Multi-timeframe technical analysis (computed) ===
@@ -56,7 +64,7 @@ def build_user_prompt(symbol: str, ta_digest_text: str, tf_scores: list[float], 
 === Numeric summary ===
 Timeframe scores (order: 5m,15m,30m,1h,1d,1w,1M): [{scores_line}]
 Timeframe labels: {labels_line}
-Mean score: {mean_score:+.4f}
+{aggregate_score_label}: {aggregate_score:+.4f}
 Symbol: {symbol}
 
 Based on ALL of the above, output the JSON decision."""
@@ -141,11 +149,20 @@ def run_gemini_decision(
     ta_digest_text: str,
     tf_scores: list[float],
     tf_labels: list[str],
-    mean_score: float,
+    aggregate_score: float,
+    *,
+    aggregate_score_label: str = "Mean score",
 ) -> dict[str, Any] | None:
     """Full prompt + Gemini call; returns parsed trade dict or None."""
     sys_p = build_system_prompt(symbol, quote_close)
-    usr_p = build_user_prompt(symbol, ta_digest_text, tf_scores, tf_labels, mean_score)
+    usr_p = build_user_prompt(
+        symbol,
+        ta_digest_text,
+        tf_scores,
+        tf_labels,
+        aggregate_score,
+        aggregate_score_label=aggregate_score_label,
+    )
     return gemini_trade_decision(usr_p, system_instruction=sys_p)
 
 

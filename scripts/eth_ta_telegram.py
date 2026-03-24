@@ -36,6 +36,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1):
   GEMINI_MODEL=gemini-1.5-flash
 
   TA_ENTRY_ON_SIGNAL_BANNER=0  # if 1: open LONG/SHORT when 📌 BULLISH/BEARISH banner fires (same TP%/SL% as open-every); falls back to Gemini/mean if no banner
+  TA_SIGNAL_ON_5M=1           # if 1 (default): 📌 banner + mean-score/Gemini entries use 5m TF score/label, not mean TF score; set 0 for legacy mean-TF behavior
 """
 from __future__ import annotations
 
@@ -101,6 +102,11 @@ def _last(x: np.ndarray | None) -> float | None:
     if np.isnan(v):
         return None
     return v
+
+
+def _signal_on_5m() -> bool:
+    """When True, signal banner and entry thresholds use 5m TF score/label (default on)."""
+    return os.environ.get("TA_SIGNAL_ON_5M", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _tf_label(score: float) -> str:
@@ -255,6 +261,9 @@ class TASnapshot:
     tf_labels: list[str]
     mean_score: float
     score_5m: float  # first TF in list (5m) — used for direction when TA_OPEN_EVERY_DIGEST=1
+    score_for_entry: float  # 5m or mean per TA_SIGNAL_ON_5M — thresholds TA_LONG_ENTRY_SCORE / TA_SHORT_ENTRY_SCORE
+    entry_score_kind: str  # "5m" or "mean"
+    label_5m: str  # _tf_label(score_5m) string e.g. Buy, Neutral
     df_5m: pd.DataFrame | None
 
 
@@ -324,24 +333,37 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
 
     mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
     score_5m = float(tf_scores[0]) if tf_scores else 0.0
+    label_5m = tf_labels[0] if tf_labels else "N/A"
+    use_5m_signal = _signal_on_5m()
+    score_for_entry = score_5m if use_5m_signal else mean_score
+    entry_score_kind = "5m" if use_5m_signal else "mean"
     if tf_scores:
         overall = _tf_label(mean_score)
         lines.append(f"Summary (mean TF score): {overall}")
         lines.append(f"5m score: {score_5m:+.4f} | TF labels: {', '.join(tf_labels)}")
+        if use_5m_signal:
+            lines.append(f"Entry signal (5m TF): {label_5m} (score {score_5m:+.4f})")
     else:
         overall = "N/A"
 
     signal_banner: str | None = None
-    if os.environ.get("TA_SIGNAL_ALERTS", "1").strip().lower() in ("1", "true", "yes", "on") and not digest_5m_only:
-        strong_buy = sum(1 for x in tf_labels if x == "Strong Buy")
-        strong_sell = sum(1 for x in tf_labels if x == "Strong Sell")
-        buyish = sum(1 for x in tf_labels if x in ("Strong Buy", "Buy"))
-        sellish = sum(1 for x in tf_labels if x in ("Strong Sell", "Sell"))
-        thr = int(os.environ.get("TA_SIGNAL_MIN_TF", "4"))
-        if strong_buy >= 2 or buyish >= thr:
-            signal_banner = "📌 TA SIGNAL: BULLISH (multi-TF alignment)"
-        elif strong_sell >= 2 or sellish >= thr:
-            signal_banner = "📌 TA SIGNAL: BEARISH (multi-TF alignment)"
+    if os.environ.get("TA_SIGNAL_ALERTS", "1").strip().lower() in ("1", "true", "yes", "on"):
+        if use_5m_signal and tf_labels:
+            lab5 = tf_labels[0]
+            if lab5 in ("Strong Buy", "Buy"):
+                signal_banner = "📌 TA SIGNAL: BULLISH (5m TF)"
+            elif lab5 in ("Strong Sell", "Sell"):
+                signal_banner = "📌 TA SIGNAL: BEARISH (5m TF)"
+        elif not digest_5m_only:
+            strong_buy = sum(1 for x in tf_labels if x == "Strong Buy")
+            strong_sell = sum(1 for x in tf_labels if x == "Strong Sell")
+            buyish = sum(1 for x in tf_labels if x in ("Strong Buy", "Buy"))
+            sellish = sum(1 for x in tf_labels if x in ("Strong Sell", "Sell"))
+            thr = int(os.environ.get("TA_SIGNAL_MIN_TF", "4"))
+            if strong_buy >= 2 or buyish >= thr:
+                signal_banner = "📌 TA SIGNAL: BULLISH (multi-TF alignment)"
+            elif strong_sell >= 2 or sellish >= thr:
+                signal_banner = "📌 TA SIGNAL: BEARISH (multi-TF alignment)"
 
     return TASnapshot(
         text="\n".join(lines),
@@ -350,6 +372,9 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         tf_labels=tf_labels,
         mean_score=mean_score,
         score_5m=score_5m,
+        score_for_entry=score_for_entry,
+        entry_score_kind=entry_score_kind,
+        label_5m=label_5m,
         df_5m=df_5m,
     )
 
@@ -593,7 +618,8 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
                 f"Entry: {entry:,.2f} → Exit: {exit_price:,.2f}\n"
                 f"Price P&L: {profit_pct:+.2f}% → Margin: {leveraged_pnl_pct:+.2f}% | Est. fee: ${fee_usd:.2f}\n"
                 f"Balance: ${balance_after:.2f} | Total return: {total_return_pct:+.1f}%\n"
-                f"5m TA context (now): score {snap.score_5m:+.4f} | mean {snap.mean_score:+.4f}\n"
+                f"Entry signal ({snap.entry_score_kind}): {snap.score_for_entry:+.4f} | "
+                f"5m {snap.score_5m:+.4f} | mean {snap.mean_score:+.4f}\n"
                 f"📊 Stats — Wins: {st0['wins']} | Losses: {st0['losses']} | Closed: {closed_n} | "
                 f"Accuracy: {accuracy_pct:.1f}% | Balance: ${balance_after:.2f}"
             )
@@ -611,7 +637,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         except Exception:
             pass
 
-    # --- entry: TA_OPEN_EVERY_DIGEST (5m score) > Gemini > fixed% + mean > ATR + mean ---
+    # --- entry: TA_OPEN_EVERY_DIGEST (5m) > Gemini > fixed% + score_for_entry > ATR + score_for_entry ---
     open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
     entry_on_banner = os.environ.get("TA_ENTRY_ON_SIGNAL_BANNER", "0").strip().lower() in (
         "1",
@@ -673,7 +699,8 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
                 snap.text,
                 snap.tf_scores,
                 snap.tf_labels,
-                snap.mean_score,
+                snap.score_for_entry,
+                aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
             )
         except Exception as e:
             print(f"Gemini decision failed: {e}", flush=True)
@@ -702,7 +729,8 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         conf = dec.get("confidence", 0)
         open_extra = f"Gemini conf={conf} | {reason}\n{gemini_note}" if gemini_note else f"Gemini conf={conf} | {reason}"
     elif not side and use_fixed_tp_sl:
-        ms = snap.mean_score
+        ms = snap.score_for_entry
+        es = "5m" if snap.entry_score_kind == "5m" else "mean TF"
         want_long = ms >= long_min
         want_short = ms <= short_max
         if not want_long and not want_short:
@@ -711,9 +739,10 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             return
         side = "LONG" if want_long else "SHORT"
         tp_price, sl_price = _tp_sl_fixed_price_pct(side, close_price, price_tp_pct, price_sl_pct)
-        open_extra = f"Mean score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% (price)"
+        open_extra = f"{es} score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% (price)"
     elif not side:
-        ms = snap.mean_score
+        ms = snap.score_for_entry
+        es = "5m" if snap.entry_score_kind == "5m" else "mean TF"
         want_long = ms >= long_min
         want_short = ms <= short_max
         if not want_long and not want_short:
@@ -724,12 +753,12 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             side = "LONG"
             tp_price = close_price + atr * tp_mult
             sl_price = close_price - atr * sl_mult
-            open_extra = f"Mean TA score {ms:+.2f} (ATR TP/SL)"
+            open_extra = f"{es} TA score {ms:+.2f} (ATR TP/SL)"
         else:
             side = "SHORT"
             tp_price = close_price - atr * tp_mult
             sl_price = close_price + atr * sl_mult
-            open_extra = f"Mean TA score {ms:+.2f} (ATR TP/SL)"
+            open_extra = f"{es} TA score {ms:+.2f} (ATR TP/SL)"
 
     if not side:
         return
