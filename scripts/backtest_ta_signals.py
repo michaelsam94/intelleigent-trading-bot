@@ -6,9 +6,10 @@ Uses Binance spot klines, the same _analyze_ohlcv score, TP/SL (_fixed_tp_sl_lev
 fees and leverage as the live paper trader.
 
 Examples:
-  python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20
-  python scripts/backtest_ta_signals.py --days 14 --initial 10 --leverage 20 --mode threshold
-  python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20 --no-filters
+  python scripts/backtest_ta_signals.py
+  python scripts/backtest_ta_signals.py --preset conservative
+  python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 5
+  python scripts/backtest_ta_signals.py --days 14 --initial 10 --mode threshold --no-filters
   python scripts/optimize_ta_backtest.py --days 30 --initial 10 --leverage 20
 """
 from __future__ import annotations
@@ -103,11 +104,31 @@ def _build_snap(
     )
 
 
+def _fee_margin_pct_roundtrip(fee_bps: float, lev: float) -> float:
+    """Round-trip fee as % of margin (same as eth_ta_telegram TA-SIM)."""
+    return 2.0 * (fee_bps / 10000.0) * lev * 100.0
+
+
 def _apply_balance(prev: float, profit_pct: float, lev: float, fee_bps: float) -> float:
     leveraged_pnl_pct = profit_pct * lev
-    fee_margin_pct = 2.0 * (fee_bps / 10000.0) * lev * 100.0
+    fee_margin_pct = _fee_margin_pct_roundtrip(fee_bps, lev)
     nxt = prev * (1.0 + leveraged_pnl_pct / 100.0 - fee_margin_pct / 100.0)
     return max(0.01, nxt)
+
+
+def _max_drawdown_pct(equity: list[float]) -> float:
+    if not equity:
+        return 0.0
+    peak = equity[0]
+    max_dd = 0.0
+    for b in equity:
+        if b > peak:
+            peak = b
+        if peak > 0:
+            dd = 100.0 * (peak - b) / peak
+            if dd > max_dd:
+                max_dd = dd
+    return max_dd
 
 
 @dataclass
@@ -129,6 +150,10 @@ def apply_cli_env(args: argparse.Namespace) -> None:
     os.environ["TA_FEE_BPS_PER_SIDE"] = str(args.fee_bps)
     os.environ["TA_TP_PRICE_PCT"] = str(args.tp_price_pct)
     os.environ["TA_SL_PRICE_PCT"] = str(args.sl_price_pct)
+    if getattr(args, "sf_long_min", None) is not None:
+        os.environ["TA_SF_LONG_MIN"] = str(args.sf_long_min)
+    if getattr(args, "sf_short_max", None) is not None:
+        os.environ["TA_SF_SHORT_MAX"] = str(args.sf_short_max)
     os.environ["TA_MIN_BARS_BETWEEN_TRADES"] = str(args.min_bars)
     os.environ["TA_SIGNAL_ON_5M"] = "1"
     if args.use_atr:
@@ -196,6 +221,8 @@ def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
     short_max = float(os.environ.get("TA_SHORT_ENTRY_SCORE", "-0.8"))
 
     balance = float(args.initial)
+    balance_no_fees = float(args.initial)
+    equity_curve: list[float] = [balance]
     signals = wins = losses = 0
     pos: dict | None = None
     last_close_idx: int | None = None
@@ -203,6 +230,10 @@ def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
 
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "5"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "3"))
+
+    gross_win_margin_net = 0.0
+    gross_loss_margin_net = 0.0
+    fee_per_trade = _fee_margin_pct_roundtrip(fee_bps, lev)
 
     for i in range(warmup, n):
         row = df.iloc[i]
@@ -238,7 +269,15 @@ def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
                     profit_pct = 100.0 * (exit_price - entry) / entry if entry else 0.0
                 else:
                     profit_pct = 100.0 * (entry - exit_price) / entry if entry else 0.0
+                lev_pnl = profit_pct * lev
+                net_margin_pct = lev_pnl - fee_per_trade
+                if net_margin_pct >= 0:
+                    gross_win_margin_net += net_margin_pct
+                else:
+                    gross_loss_margin_net += -net_margin_pct
                 balance = _apply_balance(balance, profit_pct, lev, fee_bps)
+                balance_no_fees = _apply_balance(balance_no_fees, profit_pct, lev, 0.0)
+                equity_curve.append(balance)
                 if hit_tp:
                     wins += 1
                 else:
@@ -254,8 +293,17 @@ def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
 
         score_5m, _ = eth_ta._analyze_ohlcv(df_i)
         side = ""
+        min_abs = float(getattr(args, "min_abs_score", 0.0) or 0.0)
         if args.mode == "open-every":
-            side = "LONG" if score_5m >= 0 else "SHORT"
+            if min_abs > 0:
+                if score_5m >= min_abs:
+                    side = "LONG"
+                elif score_5m <= -min_abs:
+                    side = "SHORT"
+                else:
+                    continue
+            else:
+                side = "LONG" if score_5m >= 0 else "SHORT"
         else:
             want_long = score_5m >= long_min
             want_short = score_5m <= short_max
@@ -297,6 +345,17 @@ def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
     closed = wins + losses
     open_at_end = 1 if pos else 0
     accuracy = (100.0 * wins / closed) if closed else 0.0
+    if closed == 0:
+        profit_factor = 0.0
+    elif gross_loss_margin_net > 1e-9:
+        profit_factor = gross_win_margin_net / gross_loss_margin_net
+    elif gross_win_margin_net > 1e-9:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0.0
+    max_dd_pct = _max_drawdown_pct(equity_curve)
+    approx_fee_drag_pct = fee_per_trade * closed if closed else 0.0
+    trades_per_day = closed / float(args.days) if args.days else 0.0
     return {
         "symbol": symbol,
         "days": args.days,
@@ -309,10 +368,17 @@ def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
         "losses": losses,
         "accuracy_pct": accuracy,
         "final_balance": balance,
+        "final_balance_no_fees": balance_no_fees,
         "total_return_pct": 100.0 * (balance - float(args.initial)) / float(args.initial),
+        "total_return_pct_no_fees": 100.0 * (balance_no_fees - float(args.initial)) / float(args.initial),
         "mode": args.mode,
         "filters": bool(args.filters),
         "open_positions_at_end": open_at_end,
+        "profit_factor": profit_factor,
+        "max_drawdown_pct": max_dd_pct,
+        "fee_drag_pct_approx": approx_fee_drag_pct,
+        "trades_per_day": trades_per_day,
+        "min_abs_score": float(getattr(args, "min_abs_score", 0.0) or 0.0),
     }
 
 
@@ -329,14 +395,33 @@ def main() -> int:
     )
     p.set_defaults(filters=True)
     p.add_argument(
+        "--filters",
+        action="store_true",
+        dest="legacy_filters_alias",
+        help="No-op: TA_SIGNAL_FILTERS is already on by default (kept for old scripts / docs)",
+    )
+    p.add_argument(
         "--no-filters",
         dest="filters",
         action="store_false",
         help="Disable TA_SIGNAL_FILTERS (no 15m/1h fetch; looser entries, more trades)",
     )
-    p.add_argument("--days", type=int, required=True, help="Lookback period in days")
-    p.add_argument("--initial", type=float, required=True, help="Starting balance (USDT)")
-    p.add_argument("--leverage", type=float, required=True, help="Leverage (e.g. 20)")
+    p.add_argument(
+        "--preset",
+        choices=("none", "conservative", "high-win-rate"),
+        default="none",
+        help="conservative: 2× lev, 48 bars, ATR TP/SL. high-win-rate: tight TP / wide SL margin + "
+        "strong |score| gate (targets ~60%%+ win rate; expectancy may still need tuning)",
+    )
+    p.add_argument("--days", type=int, default=30, help="Lookback period in days (default 30)")
+    p.add_argument("--initial", type=float, default=10.0, help="Starting balance USDT (default 10)")
+    p.add_argument("--leverage", type=float, default=5.0, help="Leverage (default 5; high leverage + fees often dominates backtests)")
+    p.add_argument(
+        "--min-bars",
+        type=int,
+        default=12,
+        help="Min 5m bars after a close before new entry (default 12 = 1h; reduces overtrading)",
+    )
     p.add_argument("--symbol", type=str, default="", help="Binance spot symbol (default TA_SYMBOL or ETHUSDC)")
     p.add_argument(
         "--mode",
@@ -346,7 +431,6 @@ def main() -> int:
         "threshold: LONG if score>=TA_LONG_ENTRY_SCORE, SHORT if <=TA_SHORT_ENTRY_SCORE.",
     )
     p.add_argument("--fee-bps", type=float, default=4.0, help="Fee per side in bps (default 4)")
-    p.add_argument("--min-bars", type=int, default=2, help="Min 5m bars after a close before new entry")
     p.add_argument("--tp-price-pct", type=float, default=6.0, help="TP %% on margin when not using ATR")
     p.add_argument("--sl-price-pct", type=float, default=2.5, help="SL %% on margin when not using ATR")
     p.add_argument(
@@ -355,8 +439,56 @@ def main() -> int:
         help="TP/SL as underlying price %% (default: margin %% like TA_TP_SL_MARGIN_PCT=1)",
     )
     p.add_argument("--use-atr", action="store_true", help="TA_TP_SL_USE_ATR=1 (ATR mults for TP/SL)")
+    p.add_argument(
+        "--min-abs-score",
+        type=float,
+        default=0.0,
+        help="open-every only: only enter if 5m score >= this (LONG) or <= -this (SHORT). "
+        "e.g. 2.5 skips weak direction; improves win rate with fewer trades.",
+    )
+    p.add_argument(
+        "--sf-long-min",
+        type=float,
+        default=None,
+        metavar="N",
+        help="When filters on: override TA_SF_LONG_MIN (stricter LONGs)",
+    )
+    p.add_argument(
+        "--sf-short-max",
+        type=float,
+        default=None,
+        metavar="N",
+        help="When filters on: override TA_SF_SHORT_MAX (stricter SHORTs)",
+    )
     args = p.parse_args()
     args.margin_tp_sl = not args.underlying_tp_sl
+
+    argv = sys.argv[1:]
+    if args.preset == "conservative":
+        if "--leverage" not in argv:
+            args.leverage = 2.0
+        if "--min-bars" not in argv:
+            args.min_bars = 48
+        if "--use-atr" not in argv:
+            args.use_atr = True
+    elif args.preset == "high-win-rate":
+        # Tight TP / wide SL on margin → many TP hits; strong score + stricter filters.
+        if "--leverage" not in argv:
+            args.leverage = 3.0
+        if "--min-bars" not in argv:
+            args.min_bars = 24
+        if "--tp-price-pct" not in argv:
+            args.tp_price_pct = 1.2
+        if "--sl-price-pct" not in argv:
+            args.sl_price_pct = 10.0
+        if "--min-abs-score" not in argv:
+            args.min_abs_score = 2.2
+        if "--use-atr" not in argv:
+            args.use_atr = False
+        if "--sf-long-min" not in argv:
+            args.sf_long_min = 2.5
+        if "--sf-short-max" not in argv:
+            args.sf_short_max = -2.5
 
     try:
         r = run_backtest(args)
@@ -365,11 +497,25 @@ def main() -> int:
         return 1
 
     print(f"Symbol: {r['symbol']} | Period: {r['days']}d | Initial: ${r['initial']:.2f} | Leverage: {r['leverage']}x")
+    mas = r.get("min_abs_score") or 0.0
+    if mas > 0:
+        print(f"Min |score| gate: {mas:.2f} (open-every)")
     print(f"Mode: {r['mode']} | TA_SIGNAL_FILTERS: {'on' if r['filters'] else 'off'}")
     print(f"Signals opened (entries): {r['signals_opened']}")
     print(f"Closed trades: {r['closed_trades']} | Wins: {r['wins']} | Losses: {r['losses']}")
     print(f"Win rate (accuracy): {r['accuracy_pct']:.2f}%")
-    print(f"Final balance: ${r['final_balance']:.2f} | Total return: {r['total_return_pct']:+.2f}%")
+    pf = r.get("profit_factor", 0.0)
+    pf_s = f"{pf:.2f}" if pf != float("inf") else "inf"
+    print(f"Profit factor (net margin): {pf_s} | Max drawdown: {r.get('max_drawdown_pct', 0):.1f}%")
+    print(f"Approx. fee drag (sum of round-trip margin %%): {r.get('fee_drag_pct_approx', 0):.1f}% | Trades/day: {r.get('trades_per_day', 0):.2f}")
+    print(
+        f"Final balance (no fees): ${r['final_balance_no_fees']:.2f} | "
+        f"Total return: {r['total_return_pct_no_fees']:+.2f}%"
+    )
+    print(
+        f"Final balance (with fees): ${r['final_balance']:.2f} | "
+        f"Total return: {r['total_return_pct']:+.2f}%"
+    )
     if r.get("open_positions_at_end"):
         print("Note: 1 position was still open at period end (not counted in win/loss).")
     return 0

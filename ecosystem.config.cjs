@@ -141,7 +141,9 @@ module.exports = {
             : env.TA_TRADE_SIM_ENABLED ?? env.TA_TRADE_ENABLED ?? "0",
         // Gemini for TA paper entries: default off; set TA_USE_GEMINI=1 or TA_GEMINI_ENABLED=1 in .env (+ GEMINI_API_KEY)
         TA_USE_GEMINI: env.TA_USE_GEMINI ?? env.TA_GEMINI_ENABLED ?? "0",
-        // TA-SIM: align with scripts/backtest_ta_signals.py defaults; override in .env. Grid-tune: scripts/optimize_ta_backtest.py
+        // Match scripts/backtest_ta_signals.py --preset high-win-rate; set TA_PRESET=none in .env to use manual TA_* only
+        TA_PRESET: env.TA_PRESET ?? "high-win-rate",
+        // TA-SIM: legacy fallbacks when preset off; grid-tune: scripts/optimize_ta_backtest.py
         TA_SIGNAL_FILTERS: env.TA_SIGNAL_FILTERS ?? "1",
         TA_TP_PRICE_PCT: env.TA_TP_PRICE_PCT ?? "6",
         TA_SL_PRICE_PCT: env.TA_SL_PRICE_PCT ?? "2.5",

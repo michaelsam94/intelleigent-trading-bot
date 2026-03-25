@@ -56,6 +56,13 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_SF_HT_BULLISH_MIN=0.5    # HTF score at/above = bullish (blocks SHORT)
 
   TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
+
+  Preset (optional — matches scripts/backtest_ta_signals.py --preset high-win-rate):
+  TA_PRESET=high-win-rate     # or TA_HIGH_WIN_RATE=1; disable with TA_PRESET=none
+    → TA_LEVERAGE=3 TA_MIN_BARS_BETWEEN_TRADES=24 TA_TP_PRICE_PCT=1.2 TA_SL_PRICE_PCT=10
+    → TA_TP_SL_USE_ATR=0 TA_SF_LONG_MIN=2.5 TA_SF_SHORT_MAX=-2.5 TA_OPEN_EVERY_MIN_ABS_SCORE=2.2
+    → TA_SIGNAL_FILTERS=1 TA_ENTRY_ON_SIGNAL_BANNER=0
+  TA_OPEN_EVERY_MIN_ABS_SCORE=0   # when TA_OPEN_EVERY_DIGEST=1: only LONG if 5m score >= N, SHORT if <= -N; 0 = sign-only
 """
 from __future__ import annotations
 
@@ -99,6 +106,46 @@ def _load_project_dotenv() -> None:
             val = val[1:-1].replace("\\'", "'")
         if key:
             os.environ[key] = val
+
+
+def _env_preset_name() -> str:
+    """TA_PRESET=high-win-rate or TA_HIGH_WIN_RATE=1 → high-win-rate bundle (see _apply_ta_preset)."""
+    p = (os.environ.get("TA_PRESET") or "").strip().lower()
+    if p in ("", "none", "off", "0", "false"):
+        p = ""
+    if p:
+        return p
+    if os.environ.get("TA_HIGH_WIN_RATE", "").strip().lower() in ("1", "true", "yes", "on"):
+        return "high-win-rate"
+    return ""
+
+
+def _apply_ta_preset() -> None:
+    """
+    Align live TA-SIM with scripts/backtest_ta_signals.py --preset high-win-rate.
+
+    Set TA_PRESET=high-win-rate (or TA_HIGH_WIN_RATE=1). Disable with TA_PRESET=none.
+    Values are written to os.environ so the rest of the script matches the backtest.
+    """
+    name = _env_preset_name()
+    if name != "high-win-rate":
+        return
+    # Mirrors backtest_ta_signals.py preset high-win-rate (tight TP / wide SL on margin, selective entries).
+    bundle = {
+        "TA_LEVERAGE": "3",
+        "TA_MIN_BARS_BETWEEN_TRADES": "24",
+        "TA_TP_PRICE_PCT": "1.2",
+        "TA_SL_PRICE_PCT": "10.0",
+        "TA_TP_SL_USE_ATR": "0",
+        "TA_SF_LONG_MIN": "2.5",
+        "TA_SF_SHORT_MAX": "-2.5",
+        "TA_OPEN_EVERY_MIN_ABS_SCORE": "2.2",
+        "TA_SIGNAL_FILTERS": "1",
+        "TA_ENTRY_ON_SIGNAL_BANNER": "0",
+    }
+    for k, v in bundle.items():
+        os.environ[k] = v
+
 
 import talib
 
@@ -914,7 +961,21 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     if open_every:
         sc5 = snap.score_5m
-        side = "LONG" if sc5 >= 0 else "SHORT"
+        try:
+            min_abs = float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0"))
+        except ValueError:
+            min_abs = 0.0
+        if min_abs > 0:
+            if sc5 >= min_abs:
+                side = "LONG"
+            elif sc5 <= -min_abs:
+                side = "SHORT"
+            else:
+                side = ""
+        else:
+            side = "LONG" if sc5 >= 0 else "SHORT"
+        if not side:
+            return
         tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(
             side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
         )
@@ -1094,6 +1155,9 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
 def main() -> int:
     _load_project_dotenv()
+    # Default matches ecosystem.config.cjs eth-ta-telegram; set TA_PRESET=none to use only explicit TA_* from .env
+    os.environ.setdefault("TA_PRESET", "high-win-rate")
+    _apply_ta_preset()
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     trade_sim = _ta_trade_sim_enabled()
 
@@ -1122,8 +1186,10 @@ def main() -> int:
             flush=True,
         )
 
+    preset_line = _env_preset_name()
     print(
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim} "
+        f"TA_PRESET={preset_line or '(none)'} "
         f"gemini_entries={_gemini_entries_env_enabled()} (off when TA_OPEN_EVERY_DIGEST=1)",
         flush=True,
     )
