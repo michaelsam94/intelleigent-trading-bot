@@ -27,9 +27,12 @@ if str(_ROOT) not in sys.path:
 
 def _load_eth_ta():
     p = _ROOT / "scripts" / "eth_ta_telegram.py"
-    spec = importlib.util.spec_from_file_location("eth_ta_telegram_bt", p)
+    name = "eth_ta_telegram_bt"
+    spec = importlib.util.spec_from_file_location(name, p)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    # Required on Python 3.12+: @dataclass resolves cls.__module__ via sys.modules during exec_module.
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 
