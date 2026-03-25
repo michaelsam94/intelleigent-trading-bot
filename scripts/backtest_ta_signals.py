@@ -9,6 +9,7 @@ Examples:
   python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20
   python scripts/backtest_ta_signals.py --days 14 --initial 10 --leverage 20 --mode threshold
   python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20 --no-filters
+  python scripts/optimize_ta_backtest.py --days 30 --initial 10 --leverage 20
 """
 from __future__ import annotations
 
@@ -16,7 +17,9 @@ import argparse
 import importlib.util
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -67,7 +70,6 @@ def _precompute_htf_for_5m(
     df_hi = _ensure_close_time(df_hi)
     n = len(df_5m)
     scores: list[float | None] = [None] * n
-    ct = df_hi["close_time"].values
     for i in range(n):
         end_ts = df_5m["timestamp"].iloc[i] + pd.Timedelta(minutes=5)
         mask = df_hi["close_time"] <= end_ts
@@ -108,14 +110,21 @@ def _apply_balance(prev: float, profit_pct: float, lev: float, fee_bps: float) -
     return max(0.01, nxt)
 
 
-def run_backtest(args: argparse.Namespace) -> dict:
-    eth_ta = _load_eth_ta()
-    eth_ta._load_project_dotenv()
-    # Default: TA_SIGNAL_FILTERS on (matches stricter TA-SIM). --no-filters overrides.
+@dataclass
+class BacktestCache:
+    """Pre-fetched OHLCV + HTF scores so grid search does not re-hit Binance."""
 
-    # CLI overrides env for this run
-    if args.symbol:
-        os.environ["TA_SYMBOL"] = args.symbol.upper()
+    eth_ta: Any
+    df: pd.DataFrame
+    sc15: list[float | None] | None
+    sc1h: list[float | None] | None
+    symbol: str
+
+
+def apply_cli_env(args: argparse.Namespace) -> None:
+    """Set TA_* env from CLI (same as a single backtest run)."""
+    if getattr(args, "symbol", None):
+        os.environ["TA_SYMBOL"] = str(args.symbol).upper()
     os.environ["TA_LEVERAGE"] = str(args.leverage)
     os.environ["TA_FEE_BPS_PER_SIDE"] = str(args.fee_bps)
     os.environ["TA_TP_PRICE_PCT"] = str(args.tp_price_pct)
@@ -132,6 +141,13 @@ def run_backtest(args: argparse.Namespace) -> dict:
     else:
         os.environ["TA_SIGNAL_FILTERS"] = "0"
 
+
+def load_cache(args: argparse.Namespace) -> BacktestCache:
+    """Load klines once; used by single run and optimizer."""
+    eth_ta = _load_eth_ta()
+    eth_ta._load_project_dotenv()
+    apply_cli_env(args)
+
     symbol = os.environ.get("TA_SYMBOL", "ETHUSDC").strip().upper()
     client = eth_ta._client()
     end_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
@@ -143,8 +159,6 @@ def run_backtest(args: argparse.Namespace) -> dict:
 
     df = eth_ta._klines_to_df(raw)
     df = _ensure_close_time(df)
-    n = len(df)
-    warmup = 60
 
     sc15 = sc1h = None
     if args.filters:
@@ -162,6 +176,20 @@ def run_backtest(args: argparse.Namespace) -> dict:
                 file=sys.stderr,
             )
 
+    return BacktestCache(eth_ta=eth_ta, df=df, sc15=sc15, sc1h=sc1h, symbol=symbol)
+
+
+def run_simulation(args: argparse.Namespace, cache: BacktestCache) -> dict:
+    """
+    Run bar loop using preloaded cache. Reads TA_* from os.environ (set apply_cli_env + overrides first).
+    """
+    eth_ta = cache.eth_ta
+    df = cache.df
+    sc15, sc1h = cache.sc15, cache.sc1h
+    symbol = cache.symbol
+    n = len(df)
+    warmup = 60
+
     lev = float(args.leverage)
     fee_bps = float(args.fee_bps)
     long_min = float(os.environ.get("TA_LONG_ENTRY_SCORE", "0.8"))
@@ -171,7 +199,7 @@ def run_backtest(args: argparse.Namespace) -> dict:
     signals = wins = losses = 0
     pos: dict | None = None
     last_close_idx: int | None = None
-    min_bars = int(args.min_bars)
+    min_bars = int(os.environ.get("TA_MIN_BARS_BETWEEN_TRADES", str(args.min_bars)))
 
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "5"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "3"))
@@ -288,6 +316,12 @@ def run_backtest(args: argparse.Namespace) -> dict:
     }
 
 
+def run_backtest(args: argparse.Namespace) -> dict:
+    """Single run: load data then simulate."""
+    cache = load_cache(args)
+    return run_simulation(args, cache)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Backtest TA signal strategy (eth_ta_telegram TA-SIM logic). "
@@ -312,9 +346,9 @@ def main() -> int:
         "threshold: LONG if score>=TA_LONG_ENTRY_SCORE, SHORT if <=TA_SHORT_ENTRY_SCORE.",
     )
     p.add_argument("--fee-bps", type=float, default=4.0, help="Fee per side in bps (default 4)")
-    p.add_argument("--min-bars", type=int, default=1, help="Min 5m bars after a close before new entry")
-    p.add_argument("--tp-price-pct", type=float, default=5.0, help="TP %% on margin when not using ATR")
-    p.add_argument("--sl-price-pct", type=float, default=3.0, help="SL %% on margin when not using ATR")
+    p.add_argument("--min-bars", type=int, default=2, help="Min 5m bars after a close before new entry")
+    p.add_argument("--tp-price-pct", type=float, default=6.0, help="TP %% on margin when not using ATR")
+    p.add_argument("--sl-price-pct", type=float, default=2.5, help="SL %% on margin when not using ATR")
     p.add_argument(
         "--underlying-tp-sl",
         action="store_true",

@@ -23,14 +23,14 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_SL_PCT_FALLBACK=0.1
   TA_LONG_ENTRY_SCORE=0.8      # mean TF score >= this → open LONG
   TA_SHORT_ENTRY_SCORE=-0.8    # mean TF score <= this → open SHORT
-  TA_MIN_BARS_BETWEEN_TRADES=1 # 5m bars after a close before new entry
+  TA_MIN_BARS_BETWEEN_TRADES=2 # 5m bars after a close before new entry (reduces fee drag)
   TA_STATE_DIR=data/ta_sim     # isolated from ML trader position.json
   TA_RESET_BALANCE_ON_RESTART=1  # reset balance, position, stats on process start
 
   TA_OPEN_EVERY_DIGEST=1       # one new trade each digest when flat; direction from 5m TA score (>=0 LONG else SHORT)
   TA_DIGEST_5M_ONLY=1          # only 5m TA in Telegram/API (lighter)
-  TA_TP_PRICE_PCT=5            # fixed TP % (margin or underlying — see TA_TP_SL_MARGIN_PCT)
-  TA_SL_PRICE_PCT=3            # fixed SL %
+  TA_TP_PRICE_PCT=6            # fixed TP % margin (wider TP vs SL helps net edge at high leverage; tune via optimize_ta_backtest)
+  TA_SL_PRICE_PCT=2.5          # fixed SL % margin
   TA_TP_SL_MARGIN_PCT=1        # 1=TP/SL % are margin P&L (÷ leverage → price); 0=underlying price %
   TA_TP_SL_USE_ATR=0           # 1=fixed TP/SL paths use ATR(14) on 5m (see TA_SIGNAL_*_ATR_MULT); overrides margin/%
   TA_SIGNAL_TP_ATR_MULT=2.0    # TP distance = mult × ATR (default 2 for 2:1 vs SL)
@@ -44,7 +44,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_ENTRY_ON_SIGNAL_BANNER=0  # if 1: open LONG/SHORT when 📌 BULLISH/BEARISH banner fires (same TP%/SL% as open-every); falls back to Gemini/mean if no banner
   TA_SIGNAL_ON_5M=1           # if 1 (default): 📌 banner + mean-score/Gemini entries use 5m TF score/label, not mean TF score; set 0 for legacy mean-TF behavior
 
-  TA_SIGNAL_FILTERS=0         # 1=stricter TA-SIM entries: score band, ADX+MACD, 15m/1h trend (see docs)
+  TA_SIGNAL_FILTERS=1         # 0=looser entries; 1=stricter: score band, ADX+MACD, 15m/1h (see docs). Tune via scripts/optimize_ta_backtest.py
   TA_SF_SCORE_FILTER=1        # 5m score band (with TA_SF_LONG_MIN / TA_SF_SHORT_MAX)
   TA_SF_LONG_MIN=2.0          # LONG only if 5m score >= this
   TA_SF_SHORT_MAX=-2.0        # SHORT only if 5m score <= this
@@ -204,7 +204,7 @@ def _gemini_entries_env_enabled() -> bool:
 
 def _signal_filters_enabled() -> bool:
     """Stricter TA-SIM entry gates (score band, ADX/MACD, higher-TF trend)."""
-    return os.environ.get("TA_SIGNAL_FILTERS", "0").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("TA_SIGNAL_FILTERS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _sf_sub(name: str, default: str = "1") -> bool:
@@ -769,7 +769,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     sl_pct = float(os.environ.get("TA_SL_PCT_FALLBACK", "0.1")) / 100.0
     long_min = float(os.environ.get("TA_LONG_ENTRY_SCORE", "0.8"))
     short_max = float(os.environ.get("TA_SHORT_ENTRY_SCORE", "-0.8"))
-    min_bars = int(os.environ.get("TA_MIN_BARS_BETWEEN_TRADES", "1"))
+    min_bars = int(os.environ.get("TA_MIN_BARS_BETWEEN_TRADES", "2"))
 
     df = snap.df_5m
     row = df.iloc[-1]
@@ -876,8 +876,8 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         "yes",
         "on",
     )
-    price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "5"))
-    price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "3"))
+    price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
+    price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
     use_fixed_tp_sl = open_every or os.environ.get("TA_USE_FIXED_TP_SL_PCT", "0").strip().lower() in (
         "1",
         "true",
