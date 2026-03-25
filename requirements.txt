@@ -24,10 +24,8 @@ ta-lib  # Python wrapper for TA-lib (native) library
 scikit-learn>=1.6
 lightgbm==4.*
 xgboost>=2.0
-# TensorFlow 2.20 requires keras>=3.10.0 (PyPI). Keras 3.10+ needs Python >=3.10 — use Python 3.10–3.13 for this stack.
-# (There is no keras 3.13.* on PyPI; pin below matches TF and avoids bogus 3.13.*.)
 tensorflow==2.20.*
-keras>=3.10.0,<3.11
+keras==3.13.*
 
 # Phase 2–4 optional
 shap  # SHAP feature importance (scripts/shap_feature_importance.py)

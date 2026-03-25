@@ -78,7 +78,7 @@ def _iter_grid(grid: dict[str, list[str]]):
     keys = list(grid.keys())
     vals = [grid[k] for k in keys]
     for combo in itertools.product(*vals):
-        yield dict(zip(keys, combo))
+        yield dict(zip(keys, combo, strict=True))
 
 
 def _build_base_args(ns: argparse.Namespace) -> argparse.Namespace:
@@ -179,26 +179,8 @@ def main() -> int:
     )
 
     top_n = min(args.top, len(results))
-    profitable_n = sum(1 for _e, rr in results if rr["total_return_pct"] > 0.0)
-    all_losing = profitable_n == 0
-
     print()
-    print(
-        f"Summary: profitable runs (total return > 0): {profitable_n} / {len(results)} "
-        f"(grid points that met --min-closed)"
-    )
-    if all_losing:
-        print(
-            ">>> Every combination lost money in this window. The list below is ranked by "
-            "highest final balance = smallest loss, not a winning strategy."
-        )
-    print()
-    title = (
-        "Best combinations by final balance (profitable in this window)"
-        if not all_losing
-        else "Least-bad combinations (smallest loss) — copy into .env only if you still want to tune TA-SIM"
-    )
-    print(f"{title}:")
+    print("Top combinations (copy into .env for eth_ta_telegram / TA-SIM):")
     print("-" * 72)
     best = results[0][0]
     for rank in range(top_n):
@@ -210,24 +192,14 @@ def main() -> int:
         )
     print("-" * 72)
     print()
-    if all_losing:
-        print("Suggested .env snippet (least loss — not a profitable backtest):")
-    else:
-        print("Suggested .env snippet (best row by final balance):")
+    print("Suggested .env snippet (best row):")
     for k in sorted(best.keys()):
         print(f"{k}={best[k]}")
     print()
-    if all_losing:
-        print(
-            "This period had no winning grid point: fees + leverage + signal edge can all be negative. "
-            "Try a longer/different date range, --full grid, lower --leverage, or treat paper results "
-            "as risk diagnostics only."
-        )
-    else:
-        print(
-            "Note: Strong backtest returns can still overfit. Re-run on an out-of-sample window "
-            "before relying on live trading."
-        )
+    print(
+        "Note: High backtest returns often overfit past data. Re-run on an out-of-sample window "
+        "before relying on live trading."
+    )
     return 0
 
 
