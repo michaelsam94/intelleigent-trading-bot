@@ -8,7 +8,7 @@ fees and leverage as the live paper trader.
 Examples:
   python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20
   python scripts/backtest_ta_signals.py --days 14 --initial 10 --leverage 20 --mode threshold
-  TA_SIGNAL_FILTERS=1 python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20 --filters
+  python scripts/backtest_ta_signals.py --days 30 --initial 100 --leverage 20 --no-filters
 """
 from __future__ import annotations
 
@@ -111,6 +111,7 @@ def _apply_balance(prev: float, profit_pct: float, lev: float, fee_bps: float) -
 def run_backtest(args: argparse.Namespace) -> dict:
     eth_ta = _load_eth_ta()
     eth_ta._load_project_dotenv()
+    # Default: TA_SIGNAL_FILTERS on (matches stricter TA-SIM). --no-filters overrides.
 
     # CLI overrides env for this run
     if args.symbol:
@@ -157,7 +158,7 @@ def run_backtest(args: argparse.Namespace) -> dict:
             sc1h = _precompute_htf_for_5m(df, df_1h, eth_ta._analyze_ohlcv)
         if sc15 is None or sc1h is None:
             print(
-                "Warning: --filters needs 15m and 1h klines; missing HTF series — no entries will pass.",
+                "Warning: TA signal filters need 15m and 1h klines; missing HTF series — no entries will pass.",
                 file=sys.stderr,
             )
 
@@ -288,7 +289,17 @@ def run_backtest(args: argparse.Namespace) -> dict:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Backtest TA signal strategy (eth_ta_telegram TA-SIM logic).")
+    p = argparse.ArgumentParser(
+        description="Backtest TA signal strategy (eth_ta_telegram TA-SIM logic). "
+        "TA_SIGNAL_FILTERS is on by default (15m/1h gates); use --no-filters for open-every-style entries.",
+    )
+    p.set_defaults(filters=True)
+    p.add_argument(
+        "--no-filters",
+        dest="filters",
+        action="store_false",
+        help="Disable TA_SIGNAL_FILTERS (no 15m/1h fetch; looser entries, more trades)",
+    )
     p.add_argument("--days", type=int, required=True, help="Lookback period in days")
     p.add_argument("--initial", type=float, required=True, help="Starting balance (USDT)")
     p.add_argument("--leverage", type=float, required=True, help="Leverage (e.g. 20)")
@@ -310,7 +321,6 @@ def main() -> int:
         help="TP/SL as underlying price %% (default: margin %% like TA_TP_SL_MARGIN_PCT=1)",
     )
     p.add_argument("--use-atr", action="store_true", help="TA_TP_SL_USE_ATR=1 (ATR mults for TP/SL)")
-    p.add_argument("--filters", action="store_true", help="TA_SIGNAL_FILTERS=1; fetch 15m/1h for HTF gates")
     args = p.parse_args()
     args.margin_tp_sl = not args.underlying_tp_sl
 
