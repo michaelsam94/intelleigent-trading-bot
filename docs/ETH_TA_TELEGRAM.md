@@ -34,10 +34,11 @@ Use this when you want **a new paper trade on every 5m cycle** while **flat** (n
 
 1. Set **`TA_OPEN_EVERY_DIGEST=1`** (implies **Gemini is not used** for entries).
 2. **Direction** from **5m TA score** only: **LONG** if score ≥ 0, else **SHORT**.
-3. **TP / SL** as fixed **%** (not ATR). By default (**`TA_TP_SL_MARGIN_PCT=1`**) those percents are **margin return** targets (same model as closes: margin return ≈ price move × leverage):
-   - Defaults: **`TA_TP_PRICE_PCT=5`**, **`TA_SL_PRICE_PCT=3`** → e.g. **+5% / −3% on margin**; ETH **price** move ≈ **5/L**% / **3/L**% with leverage **L** (`TA_LEVERAGE`, default **20**).
-   - SHORT example @ 20x: SL is about **+0.15%** ETH above entry (≈ **−3%** on margin), not **+3%** on spot.
-   - Set **`TA_TP_SL_MARGIN_PCT=0`** for legacy behavior: **5% / 3%** on **underlying price** (wide stops on high leverage).
+3. **TP / SL** — pick one of:
+   - **ATR on 5m (recommended for volatility):** set **`TA_TP_SL_USE_ATR=1`**. Uses **ATR(14)** on the 5m bars with **`TA_SIGNAL_TP_ATR_MULT`** / **`TA_SIGNAL_SL_ATR_MULT`** (defaults **2.0** / **1.0** → **2:1** TP:SL distance in **price**). **LONG:** TP = entry + 2×ATR, SL = entry − 1×ATR; **SHORT:** inverted. **Overrides** margin/% for open-every, banner, and **`TA_USE_FIXED_TP_SL_PCT`** paths when ATR is valid.
+   - **Fixed %:** if **`TA_TP_SL_USE_ATR=0`**, by default (**`TA_TP_SL_MARGIN_PCT=1`**) **`TA_TP_PRICE_PCT`** / **`TA_SL_PRICE_PCT`** are **margin return** targets (margin return ≈ price move × leverage):
+     - Defaults: **`TA_TP_PRICE_PCT=5`**, **`TA_SL_PRICE_PCT=3`** → e.g. **+5% / −3% on margin**; ETH **price** move ≈ **5/L**% / **3/L**% with leverage **L** (`TA_LEVERAGE`, default **20**).
+     - Set **`TA_TP_SL_MARGIN_PCT=0`** for legacy behavior: **5% / 3%** on **underlying price** (wide stops on high leverage).
 4. **`TA_DIGEST_5M_ONLY=1`** — only compute/send **5m** TA (recommended with this mode).
 5. After each **close**, Telegram (or logs) includes **wins, losses, closed count, win rate (accuracy %), balance**.
 
@@ -171,6 +172,8 @@ pm2 logs eth-ta-telegram
 | `TA_OPEN_EVERY_DIGEST` | `0` | `1` = open when flat each cycle; 5m score sign; fixed TP/SL % |
 | `TA_ENTRY_ON_SIGNAL_BANNER` | `0` | `1` = open when 📌 BULLISH/BEARISH banner fires (full digest only); fixed % TP/SL |
 | `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` | `5` / `3` | With fixed TP/SL: **margin** % if `TA_TP_SL_MARGIN_PCT=1`, else **underlying** % |
+| `TA_TP_SL_USE_ATR` | `0` | `1` = open-every / banner / fixed-% paths use **ATR(14×mult)** on 5m instead of % (see below) |
+| `TA_SIGNAL_TP_ATR_MULT` / `TA_SIGNAL_SL_ATR_MULT` | `2` / `1` | TP distance = mult × ATR, SL = mult × ATR (**2:1** default); only if `TA_TP_SL_USE_ATR=1` |
 | `TA_TP_SL_MARGIN_PCT` | `1` | `1` = `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` are **margin** targets (price move ÷ leverage); `0` = **spot** % |
 | `TA_SIGNAL_FILTERS` | `0` | `1` = stricter TA-SIM entries (score band, ADX/MACD, 15m/1h); see section above |
 | `TA_SF_LONG_MIN` / `TA_SF_SHORT_MAX` | `2.0` / `-2.0` | 5m score limits when `TA_SF_SCORE_FILTER=1` |

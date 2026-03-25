@@ -32,6 +32,9 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_TP_PRICE_PCT=5            # fixed TP % (margin or underlying — see TA_TP_SL_MARGIN_PCT)
   TA_SL_PRICE_PCT=3            # fixed SL %
   TA_TP_SL_MARGIN_PCT=1        # 1=TP/SL % are margin P&L (÷ leverage → price); 0=underlying price %
+  TA_TP_SL_USE_ATR=0           # 1=fixed TP/SL paths use ATR(14) on 5m (see TA_SIGNAL_*_ATR_MULT); overrides margin/%
+  TA_SIGNAL_TP_ATR_MULT=2.0    # TP distance = mult × ATR (default 2 for 2:1 vs SL)
+  TA_SIGNAL_SL_ATR_MULT=1.0    # SL distance = mult × ATR (default 1)
 
   TA_USE_GEMINI=0              # 1=enable Gemini for entries; 0=disable (TA score only). Alias: TA_GEMINI_ENABLED
   TA_GEMINI_ENABLED=0          # if TA_USE_GEMINI unset, same meaning as TA_USE_GEMINI
@@ -730,9 +733,21 @@ def _entry_filters_pass(snap: TASnapshot, side: str, df: pd.DataFrame) -> tuple[
 
 
 def _fixed_tp_sl_levels(
-    side: str, entry: float, tp_pct: float, sl_pct: float, lev: float
+    side: str,
+    entry: float,
+    tp_pct: float,
+    sl_pct: float,
+    lev: float,
+    atr_5m: float | None,
 ) -> tuple[float, float, str]:
-    """Returns (tp_price, sl_price, mode_label) for Telegram copy."""
+    """Returns (tp_price, sl_price, mode_label). mode: atr | margin | underlying."""
+    use_atr = os.environ.get("TA_TP_SL_USE_ATR", "0").strip().lower() in ("1", "true", "yes", "on")
+    if use_atr and atr_5m is not None and atr_5m > 0:
+        tpm = float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
+        slm = float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
+        if side == "LONG":
+            return entry + tpm * atr_5m, entry - slm * atr_5m, "atr"
+        return entry - tpm * atr_5m, entry + slm * atr_5m, "atr"
     use_margin = os.environ.get("TA_TP_SL_MARGIN_PCT", "1").strip().lower() in ("1", "true", "yes", "on")
     if use_margin:
         tp_p, sl_p = _tp_sl_fixed_margin_pct(side, entry, tp_pct, sl_pct, lev)
@@ -872,9 +887,19 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     use_gemini = _gemini_entries_env_enabled() and not open_every
 
-    atr = _atr_from_df(df)
+    atr_raw = _atr_from_df(df)
+    atr = atr_raw
     if atr is None or atr <= 0:
         atr = close_price * (tp_pct + sl_pct) / 2.0
+    atr_sig = atr_raw if atr_raw is not None and atr_raw > 0 else None
+    if (
+        os.environ.get("TA_TP_SL_USE_ATR", "0").strip().lower() in ("1", "true", "yes", "on")
+        and atr_sig is None
+    ):
+        print(
+            "TA_TP_SL_USE_ATR=1 but ATR(14) on 5m is unavailable — using margin/underlying % for TP/SL",
+            flush=True,
+        )
 
     side: str = ""
     tp_price: float = 0.0
@@ -882,12 +907,24 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     open_extra: str = ""
     gemini_note = ""
     opened_from_banner = False
+    last_fixed_mode = ""
+
+    tpm_atr = float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
+    slm_atr = float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
 
     if open_every:
         sc5 = snap.score_5m
         side = "LONG" if sc5 >= 0 else "SHORT"
-        tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev)
-        if _tp_sl_mode == "margin":
+        tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(
+            side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
+        )
+        last_fixed_mode = _tp_sl_mode
+        if _tp_sl_mode == "atr" and atr_sig is not None:
+            tp_sl_txt = (
+                f"TP {tpm_atr}×ATR / SL {slm_atr}×ATR "
+                f"(ATR(14)≈{atr_sig:.4f}, {tpm_atr:.1f}:{slm_atr:.1f} TP:SL on price)"
+            )
+        elif _tp_sl_mode == "margin":
             tp_sl_txt = (
                 f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
                 f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
@@ -900,8 +937,16 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         if bs:
             side = bs
             opened_from_banner = True
-            tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev)
-            if _tp_sl_mode == "margin":
+            tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(
+                side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
+            )
+            last_fixed_mode = _tp_sl_mode
+            if _tp_sl_mode == "atr" and atr_sig is not None:
+                tp_sl_txt = (
+                    f"TP {tpm_atr}×ATR / SL {slm_atr}×ATR "
+                    f"(ATR(14)≈{atr_sig:.4f}, {tpm_atr:.1f}:{slm_atr:.1f} TP:SL on price)"
+                )
+            elif _tp_sl_mode == "margin":
                 tp_sl_txt = (
                     f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
                     f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
@@ -970,8 +1015,16 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         if want_long and want_short:
             return
         side = "LONG" if want_long else "SHORT"
-        tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev)
-        if _tp_sl_mode == "margin":
+        tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(
+            side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
+        )
+        last_fixed_mode = _tp_sl_mode
+        if _tp_sl_mode == "atr" and atr_sig is not None:
+            open_extra = (
+                f"{es} score {ms:+.2f} | ATR TP/SL {tpm_atr}×/{slm_atr}× "
+                f"(ATR(14)≈{atr_sig:.4f}, {tpm_atr:.1f}:{slm_atr:.1f} TP:SL)"
+            )
+        elif _tp_sl_mode == "margin":
             open_extra = (
                 f"{es} score {ms:+.2f} | fixed TP +{price_tp_pct}% SL -{price_sl_pct}% margin "
                 f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH @ {lev}x)"
@@ -1013,7 +1066,7 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         "entry_time": str(close_time),
         "tp_price": tp_price,
         "sl_price": sl_price,
-        "atr_at_entry": atr,
+        "atr_at_entry": atr_sig if atr_sig is not None else atr,
     }
     if use_gemini and gemini_note:
         pos_data["gemini_rationale"] = gemini_note[:2000]
@@ -1021,7 +1074,13 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     _save_position(symbol, pos_data)
     emoji = "📈" if side == "LONG" else "📉"
     if open_every or opened_from_banner or (use_fixed_tp_sl and not use_gemini):
-        meta = f"Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
+        if last_fixed_mode == "atr" and atr_sig is not None:
+            meta = (
+                f"ATR(14)≈{atr_sig:.4f} | TP {tpm_atr}×ATR / SL {slm_atr}×ATR ({tpm_atr:.1f}:{slm_atr:.1f} TP:SL) | "
+                f"Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
+            )
+        else:
+            meta = f"Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
     else:
         meta = f"ATR(14)≈{atr:.4f} | Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
     _tx(
