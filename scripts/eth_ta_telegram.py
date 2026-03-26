@@ -72,6 +72,7 @@ import json
 import os
 import sys
 import time
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,6 +228,13 @@ def _ta_trade_sim_enabled() -> bool:
         )
         v = _norm(alt)
     return v in ("1", "true", "yes", "on")
+
+
+def _ta_real_trading_enabled() -> bool:
+    """Real Binance Futures trading gate: requires both TA_REAL_TRADING=1 and TA_REAL_CONFIRM=I_UNDERSTAND."""
+    if os.environ.get("TA_REAL_TRADING", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    return os.environ.get("TA_REAL_CONFIRM", "").strip().upper() == "I_UNDERSTAND"
 
 
 def _suppress_trade_sim_digest_hint() -> bool:
@@ -826,6 +834,231 @@ def _fixed_tp_sl_levels(
     return tp_p, sl_p, "underlying"
 
 
+def _round_to_step(v: float, step: float, up: bool = False) -> float:
+    if step <= 0:
+        return float(v)
+    q = Decimal(str(step))
+    d = Decimal(str(v))
+    n = d / q
+    r = n.to_integral_value(rounding=ROUND_UP if up else ROUND_DOWN) * q
+    return float(r)
+
+
+def _futures_symbol_filters(client: Client, symbol: str) -> tuple[float, float, float]:
+    ex = client.futures_exchange_info()
+    for s in ex.get("symbols", []):
+        if str(s.get("symbol", "")).upper() != symbol.upper():
+            continue
+        tick = 0.0
+        step = 0.0
+        min_qty = 0.0
+        for f in s.get("filters", []):
+            ft = f.get("filterType")
+            if ft == "PRICE_FILTER":
+                tick = float(f.get("tickSize", "0") or 0)
+            elif ft == "LOT_SIZE":
+                step = float(f.get("stepSize", "0") or 0)
+                min_qty = float(f.get("minQty", "0") or 0)
+        return tick, step, min_qty
+    raise ValueError(f"Futures symbol not found in exchange info: {symbol}")
+
+
+def _futures_position_amt(client: Client, symbol: str) -> float:
+    rows = client.futures_position_information(symbol=symbol)
+    for r in rows:
+        if str(r.get("symbol", "")).upper() == symbol.upper():
+            return float(r.get("positionAmt", "0") or 0.0)
+    return 0.0
+
+
+def _futures_setup(client: Client, symbol: str, lev: int, isolated: bool = True) -> None:
+    try:
+        client.futures_change_position_mode(dualSidePosition="false")
+    except Exception:
+        pass
+    try:
+        client.futures_change_margin_type(symbol=symbol, marginType="ISOLATED" if isolated else "CROSSED")
+    except Exception:
+        pass
+    client.futures_change_leverage(symbol=symbol, leverage=max(1, int(lev)))
+
+
+def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float] | None:
+    """
+    Decide entry from current TA logic.
+    Returns (side, close_price, tp_price, sl_price, lev) or None.
+    """
+    if snap.df_5m is None or len(snap.df_5m) < 60:
+        return None
+    df = snap.df_5m
+    close_price = float(df["close"].iloc[-1])
+    lev = float(os.environ.get("TA_LEVERAGE", "20"))
+    long_min = float(os.environ.get("TA_LONG_ENTRY_SCORE", "0.8"))
+    short_max = float(os.environ.get("TA_SHORT_ENTRY_SCORE", "-0.8"))
+    side = ""
+    open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
+    price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
+    price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
+    atr_sig = _atr_from_df(df)
+    if open_every:
+        sc5 = snap.score_5m
+        lab5 = (snap.label_5m or "").strip()
+        strong_5m_only = _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0")
+        if strong_5m_only:
+            if lab5 == "Strong Buy":
+                side = "LONG"
+            elif lab5 == "Strong Sell":
+                side = "SHORT"
+        else:
+            min_abs = float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0") or 0.0)
+            if min_abs > 0:
+                if sc5 >= min_abs:
+                    side = "LONG"
+                elif sc5 <= -min_abs:
+                    side = "SHORT"
+            else:
+                side = "LONG" if sc5 >= 0 else "SHORT"
+    else:
+        ms = snap.score_for_entry
+        want_long = ms >= long_min
+        want_short = ms <= short_max
+        if want_long and not want_short:
+            side = "LONG"
+        elif want_short and not want_long:
+            side = "SHORT"
+    if not side:
+        return None
+    ok, _reason = _entry_filters_pass(snap, side, df)
+    if not ok:
+        return None
+    tp_price, sl_price, _ = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig)
+    return side, close_price, tp_price, sl_price, lev
+
+
+def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> None:
+    """Live Binance USD-M futures execution (env-gated)."""
+    fut_symbol = os.environ.get("TA_FUTURES_SYMBOL", symbol).strip().upper()
+    client = _client()
+    dec = _decide_ta_entry(snap)
+    if dec is None:
+        return
+    side, close_price, tp_price, sl_price, lev = dec
+    # one-position-only
+    if abs(_futures_position_amt(client, fut_symbol)) > 1e-12:
+        return
+    _futures_setup(client, fut_symbol, int(lev), isolated=True)
+    tick, step, min_qty = _futures_symbol_filters(client, fut_symbol)
+    order_book = client.futures_order_book(symbol=fut_symbol, limit=5)
+    bid = float(order_book["bids"][0][0])
+    ask = float(order_book["asks"][0][0])
+    maker_bps = float(os.environ.get("TA_REAL_ENTRY_MAKER_OFFSET_BPS", "1.0"))
+    if side == "LONG":
+        raw_px = min(close_price, bid) * (1.0 - maker_bps / 10000.0)
+        px = _round_to_step(raw_px, tick, up=False)
+        entry_side = "BUY"
+    else:
+        raw_px = max(close_price, ask) * (1.0 + maker_bps / 10000.0)
+        px = _round_to_step(raw_px, tick, up=True)
+        entry_side = "SELL"
+    qty = _round_to_step(min_qty, step, up=True)
+    if qty <= 0:
+        return
+
+    def _tx(msg: str) -> None:
+        if token and recipient_chat_ids({}):
+            broadcast_telegram_plain(token, msg, {})
+        print(msg, flush=True)
+
+    preplace = os.environ.get("TA_REAL_PREPLACE_EXITS", "1").strip().lower() in ("1", "true", "yes", "on")
+    entry_id = f"ta_live_entry_{int(time.time())}"
+    if preplace:
+        try:
+            client.futures_create_order(
+                symbol=fut_symbol,
+                side="SELL" if side == "LONG" else "BUY",
+                type="TAKE_PROFIT_MARKET",
+                stopPrice=_round_to_step(tp_price, tick, up=(side == "LONG")),
+                closePosition=True,
+                workingType="MARK_PRICE",
+            )
+            client.futures_create_order(
+                symbol=fut_symbol,
+                side="SELL" if side == "LONG" else "BUY",
+                type="STOP_MARKET",
+                stopPrice=_round_to_step(sl_price, tick, up=(side == "LONG")),
+                closePosition=True,
+                workingType="MARK_PRICE",
+            )
+        except Exception:
+            pass
+
+    ord0 = client.futures_create_order(
+        symbol=fut_symbol,
+        side=entry_side,
+        type="LIMIT",
+        quantity=qty,
+        price=px,
+        timeInForce="GTC",
+        newClientOrderId=entry_id,
+    )
+    _tx(
+        f"📡 LIVE {side} LIMIT submitted\n"
+        f"Symbol: {fut_symbol} | Qty: {qty} | Limit: {px:,.2f}\n"
+        f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x"
+    )
+    oid = int(ord0.get("orderId"))
+    timeout_s = int(float(os.environ.get("TA_REAL_ENTRY_TIMEOUT_SEC", "20")))
+    start = time.time()
+    filled = False
+    avg_fill = px
+    while time.time() - start < timeout_s:
+        st = client.futures_get_order(symbol=fut_symbol, orderId=oid)
+        status = str(st.get("status", "")).upper()
+        if status == "FILLED":
+            filled = True
+            ap = st.get("avgPrice")
+            if ap:
+                avg_fill = float(ap)
+            break
+        if status in ("CANCELED", "EXPIRED", "REJECTED"):
+            break
+        time.sleep(2)
+    if not filled:
+        try:
+            client.futures_cancel_order(symbol=fut_symbol, orderId=oid)
+        except Exception:
+            pass
+        _tx("⚠️ LIVE entry not filled in time; canceled.")
+        return
+
+    # Fallback: place exits now if pre-place failed / not used.
+    try:
+        client.futures_create_order(
+            symbol=fut_symbol,
+            side="SELL" if side == "LONG" else "BUY",
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=_round_to_step(tp_price, tick, up=(side == "LONG")),
+            closePosition=True,
+            workingType="MARK_PRICE",
+        )
+        client.futures_create_order(
+            symbol=fut_symbol,
+            side="SELL" if side == "LONG" else "BUY",
+            type="STOP_MARKET",
+            stopPrice=_round_to_step(sl_price, tick, up=(side == "LONG")),
+            closePosition=True,
+            workingType="MARK_PRICE",
+        )
+    except Exception as e:
+        _tx(f"⚠️ LIVE entry filled but TP/SL placement failed: {e}")
+        return
+    _tx(
+        f"✅ LIVE {side} opened\n"
+        f"Entry fill: {avg_fill:,.2f}\n"
+        f"TP(closePosition): {tp_price:,.2f} | SL(closePosition): {sl_price:,.2f}"
+    )
+
+
 def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     """Paper trade from mean TA score; TP/SL/fees same as ML trader_simulation defaults."""
     if snap.df_5m is None or len(snap.df_5m) < 60:
@@ -1197,11 +1430,16 @@ def main() -> int:
     _apply_ta_preset()
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     trade_sim = _ta_trade_sim_enabled()
+    trade_live = _ta_real_trading_enabled()
 
-    if not trade_sim and not token:
-        print("Set TELEGRAM_BOT_TOKEN or enable TA_TRADE_SIM=1", file=sys.stderr)
+    if trade_sim and trade_live:
+        print("Both TA_TRADE_SIM and TA_REAL_TRADING are enabled; disabling paper mode in favor of real mode.", flush=True)
+        trade_sim = False
+
+    if not trade_sim and not trade_live and not token:
+        print("Set TELEGRAM_BOT_TOKEN or enable TA_TRADE_SIM=1 / TA_REAL_TRADING=1", file=sys.stderr)
         return 1
-    if not trade_sim and not recipient_chat_ids({}):
+    if not trade_sim and not trade_live and not recipient_chat_ids({}):
         print("No Telegram recipients (subscribers file or TELEGRAM_CHAT_ID).", file=sys.stderr)
         return 1
 
@@ -1228,6 +1466,7 @@ def main() -> int:
     preset_line = _env_preset_name()
     print(
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim} "
+        f"trade_live={trade_live} "
         f"TA_PRESET={preset_line or '(none)'} "
         f"gemini_entries={_gemini_entries_env_enabled()} (off when TA_OPEN_EVERY_DIGEST=1)",
         flush=True,
@@ -1238,7 +1477,7 @@ def main() -> int:
         f"TA_TRADE_ENABLED={repr(os.environ.get('TA_TRADE_ENABLED'))}",
         flush=True,
     )
-    if not trade_sim:
+    if not trade_sim and not trade_live:
         print(
             "TA_TRADE_SIM is off — no TA-SIM open/close messages. "
             "Set TA_TRADE_SIM=1 (or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED) in project .env, then pm2 restart eth-ta-telegram --update-env. "
@@ -1262,7 +1501,7 @@ def main() -> int:
             "🟢 eth-ta-telegram started\n"
             f"As of {now_s}\n"
             f"Symbol: {symbol} | Loop: {interval_sec}s\n"
-            f"TA_TRADE_SIM={trade_sim} | Gemini entries={_gemini_entries_env_enabled()} | "
+            f"TA_TRADE_SIM={trade_sim} | TA_REAL_TRADING={trade_live} | Gemini entries={_gemini_entries_env_enabled()} | "
             f"TA_SIGNAL_FILTERS={_signal_filters_enabled()}"
             f"{reset_line}"
         )
@@ -1280,6 +1519,8 @@ def main() -> int:
                 msg = snap.banner + "\n\n" + msg
             if trade_sim:
                 process_ta_trade_sim(symbol, snap, token)
+            elif trade_live:
+                process_ta_trade_live_futures(symbol, snap, token)
             elif not _suppress_trade_sim_digest_hint():
                 msg += (
                     "\n\n---\n"

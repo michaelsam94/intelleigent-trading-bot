@@ -19,6 +19,34 @@ Digest-only mode (no trades) is the default when **`TA_TRADE_SIM`** is unset or 
 - **Fees:** `TA_FEE_BPS_PER_SIDE` (default **4** bps/side); P&L matches `outputs/notifier_trades.py` margin-style math
 - **State (isolated from ML bot):** `data/ta_sim/<SYMBOL>/` — `position.json`, `balance.json`, `transactions_ta.txt`, `last_close.json`, **`stats.json`** (wins/losses for accuracy)
 
+## Real Binance Futures trading (ETHUSDC)
+
+`eth_ta_telegram.py` now has an env-gated live execution path for USD-M futures:
+
+- `TA_REAL_TRADING=1` and `TA_REAL_CONFIRM=I_UNDERSTAND` are both required.
+- Uses **one-way** mode, sets **isolated margin**, applies `TA_LEVERAGE`.
+- Entry uses a **LIMIT** order near top-of-book (maker-biased by `TA_REAL_ENTRY_MAKER_OFFSET_BPS`).
+- Tries to pre-place TP/SL close-position orders (`TA_REAL_PREPLACE_EXITS=1`), then falls back to placing them immediately after entry fill.
+- Uses minimum exchange quantity for initial live test.
+
+Suggested initial env:
+
+```bash
+TA_REAL_TRADING=0
+TA_REAL_CONFIRM=I_UNDERSTAND
+TA_FUTURES_SYMBOL=ETHUSDC
+TA_REAL_ENTRY_MAKER_OFFSET_BPS=1.0
+TA_REAL_PREPLACE_EXITS=1
+TA_REAL_ENTRY_TIMEOUT_SEC=20
+```
+
+Switch to live only when ready:
+
+```bash
+TA_TRADE_SIM=0
+TA_REAL_TRADING=1
+```
+
 ### Reset balance on restart
 
 Set either:

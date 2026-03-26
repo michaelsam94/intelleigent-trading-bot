@@ -81,11 +81,18 @@ def _ensure_close_time(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _fetch_klines_range(client, symbol: str, interval: str, start_ms: int, end_ms: int) -> list:
+def _fetch_klines_range(
+    client, symbol: str, interval: str, start_ms: int, end_ms: int, market: str = "futures"
+) -> list:
     out: list = []
     cur = start_ms
     while cur < end_ms:
-        batch = client.get_klines(symbol=symbol, interval=interval, startTime=cur, endTime=end_ms, limit=1000)
+        if market == "futures":
+            batch = client.futures_klines(
+                symbol=symbol, interval=interval, startTime=cur, endTime=end_ms, limit=1000
+            )
+        else:
+            batch = client.get_klines(symbol=symbol, interval=interval, startTime=cur, endTime=end_ms, limit=1000)
         if not batch:
             break
         out.extend(batch)
@@ -211,7 +218,7 @@ def load_cache(args: argparse.Namespace) -> BacktestCache:
     end_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
     start_ms = end_ms - int(args.days * 86400 * 1000)
 
-    raw = _fetch_klines_range(client, symbol, "5m", start_ms, end_ms)
+    raw = _fetch_klines_range(client, symbol, "5m", start_ms, end_ms, market=args.market)
     if len(raw) < 80:
         raise ValueError(f"Not enough 5m klines ({len(raw)}). Check symbol and days.")
 
@@ -220,8 +227,8 @@ def load_cache(args: argparse.Namespace) -> BacktestCache:
 
     sc15 = sc1h = None
     if args.filters:
-        r15 = _fetch_klines_range(client, symbol, "15m", start_ms - 7 * 86400 * 1000, end_ms)
-        r1h = _fetch_klines_range(client, symbol, "1h", start_ms - 30 * 86400 * 1000, end_ms)
+        r15 = _fetch_klines_range(client, symbol, "15m", start_ms - 7 * 86400 * 1000, end_ms, market=args.market)
+        r1h = _fetch_klines_range(client, symbol, "1h", start_ms - 30 * 86400 * 1000, end_ms, market=args.market)
         if len(r15) >= 60:
             df_15 = _ensure_close_time(eth_ta._klines_to_df(r15))
             sc15 = _precompute_htf_for_5m(df, df_15, eth_ta._analyze_ohlcv)
@@ -451,6 +458,12 @@ def main() -> int:
         default=preset_default,
         help="conservative: 2× lev, 48 bars, ATR TP/SL. high-win-rate: tight TP / wide SL margin + "
         "strong |score| gate (targets ~60%%+ win rate; expectancy may still need tuning)",
+    )
+    p.add_argument(
+        "--market",
+        choices=("futures", "spot"),
+        default=(os.environ.get("TA_MARKET", "futures").strip().lower() or "futures"),
+        help="Binance kline market source (default futures)",
     )
     p.add_argument("--days", type=int, default=30, help="Lookback period in days (default 30)")
     p.add_argument(
