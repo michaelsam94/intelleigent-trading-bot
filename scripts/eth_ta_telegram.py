@@ -51,6 +51,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_SF_TREND_FILTER=1        # ADX + MACD alignment on 5m
   TA_SF_ADX_MIN=20            # set -1 to skip ADX check only
   TA_SF_MACD_ALIGN=1          # LONG: MACD hist > 0; SHORT: < 0
+  TA_SF_MACD_BYPASS_STRONG_5M=0  # if 1: skip MACD gate when 5m label matches side (Strong Buy→LONG, Strong Sell→SHORT)
   TA_SF_HTF_FILTER=1          # skip LONG if 15m/1h bearish; skip SHORT if bullish
   TA_SF_HT_BEARISH_MAX=-0.5   # HTF score at/below = bearish (blocks LONG)
   TA_SF_HT_BULLISH_MIN=0.5    # HTF score at/above = bullish (blocks SHORT)
@@ -751,12 +752,23 @@ def _entry_filters_pass(snap: TASnapshot, side: str, df: pd.DataFrame) -> tuple[
             if adx < adx_min:
                 return False, f"ADX {adx:.1f} < TA_SF_ADX_MIN ({adx_min})"
         if _sf_sub("TA_SF_MACD_ALIGN", "1"):
-            if mhist is None:
-                return False, "MACD histogram unavailable"
-            if side == "LONG" and mhist <= 0:
-                return False, f"MACD hist {mhist:.6f} not bullish (≤0)"
-            if side == "SHORT" and mhist >= 0:
-                return False, f"MACD hist {mhist:.6f} not bearish (≥0)"
+            # Composite TA score can be Strong Buy/Sell while MACD hist still lags; optional bypass.
+            strong_label_match = (side == "LONG" and snap.label_5m == "Strong Buy") or (
+                side == "SHORT" and snap.label_5m == "Strong Sell"
+            )
+            bypass_macd = (
+                _sf_sub("TA_SF_MACD_BYPASS_STRONG_5M", "0")
+                or (
+                    _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0") and strong_label_match
+                )
+            )
+            if not bypass_macd:
+                if mhist is None:
+                    return False, "MACD histogram unavailable"
+                if side == "LONG" and mhist <= 0:
+                    return False, f"MACD hist {mhist:.6f} not bullish (≤0)"
+                if side == "SHORT" and mhist >= 0:
+                    return False, f"MACD hist {mhist:.6f} not bearish (≥0)"
 
     if _sf_sub("TA_SF_HTF_FILTER", "1"):
         h = snap.htf_scores
