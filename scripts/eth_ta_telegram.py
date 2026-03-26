@@ -25,7 +25,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_SHORT_ENTRY_SCORE=-0.8    # mean TF score <= this → open SHORT
   TA_MIN_BARS_BETWEEN_TRADES=2 # 5m bars after a close before new entry (reduces fee drag)
   TA_STATE_DIR=data/ta_sim     # isolated from ML trader position.json
-  TA_RESET_BALANCE_ON_RESTART=1  # reset balance, position, stats on process start
+  TA_RESET_BALANCE_ON_RESTART=1  # reset balance, position, stats, last_close cooldown on process start
 
   TA_OPEN_EVERY_DIGEST=1       # one new trade each digest when flat; direction from 5m TA score (>=0 LONG else SHORT)
   TA_DIGEST_5M_ONLY=1          # only 5m TA in Telegram/API (lighter)
@@ -639,6 +639,16 @@ def _clear_position(symbol: str) -> None:
         p.unlink()
 
 
+def _clear_last_close(symbol: str) -> None:
+    """Remove post-close cooldown marker (used when resetting TA-SIM state on start)."""
+    p = _last_close_path(symbol)
+    if p.is_file():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def _load_balance(symbol: str) -> tuple[float, float]:
     start = float(os.environ.get("TA_STARTING_BALANCE", "10"))
     p = _bal_path(symbol)
@@ -1208,9 +1218,11 @@ def main() -> int:
         st = float(os.environ.get("TA_STARTING_BALANCE", "10"))
         _save_balance(symbol, st, st)
         _clear_position(symbol)
+        _clear_last_close(symbol)
         _save_stats(symbol, 0, 0)
         print(
-            f"TA reset on start: balance={st}, position + stats cleared (TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)",
+            f"TA reset on start: balance={st}, position + stats + inter-trade cooldown cleared "
+            f"(TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)",
             flush=True,
         )
 
@@ -1244,7 +1256,9 @@ def main() -> int:
         st_bal = float(os.environ.get("TA_STARTING_BALANCE", "10"))
         reset_line = ""
         if reset_env:
-            reset_line = f"\nReset on start: balance/position/stats cleared → ${st_bal:.2f} start."
+            reset_line = (
+                f"\nReset on start: balance/position/stats/cooldown cleared → ${st_bal:.2f} start."
+            )
         startup_msg = (
             "🟢 eth-ta-telegram started\n"
             f"As of {now_s}\n"
