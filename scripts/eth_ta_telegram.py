@@ -912,17 +912,16 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
                 st0["losses"] += 1
             _save_stats(symbol, st0["wins"], st0["losses"])
             closed_n = st0["wins"] + st0["losses"]
-            accuracy_pct = 100.0 * st0["wins"] / closed_n if closed_n else 0.0
 
             _tx(
-                f"🔒 TA-SIM {side} closed ({emoji} {res})\n"
+                f"🔒 {side} closed ({emoji} {res})\n"
                 f"Entry: {entry:,.2f} → Exit: {exit_price:,.2f}\n"
-                f"Price P&L: {profit_pct:+.2f}% → Margin: {leveraged_pnl_pct:+.2f}% | Est. fee: ${fee_usd:.2f}\n"
-                f"Balance: ${balance_after:.2f} | Total return: {total_return_pct:+.1f}%\n"
-                f"Entry signal ({snap.entry_score_kind}): {snap.score_for_entry:+.4f} | "
-                f"5m {snap.score_5m:+.4f} | mean {snap.mean_score:+.4f}\n"
-                f"📊 Stats — Wins: {st0['wins']} | Losses: {st0['losses']} | Closed: {closed_n} | "
-                f"Accuracy: {accuracy_pct:.1f}% | Balance: ${balance_after:.2f}"
+                f"Price P&L: {profit_pct:+.2f}% → Margin: {leveraged_pnl_pct:+.2f}% | Fee: ${fee_usd:.2f}\n"
+                f"Balance: ${balance_after:.2f} | Total return: {total_return_pct:+.1f}%\n\n"
+                f"📊 Session stats\n"
+                f"Wins: {st0['wins']} | Losses: {st0['losses']}\n"
+                f"Balance: ${balance_after:.2f} (start ${starting_balance:.2f})\n"
+                f"Total return: {total_return_pct:+.1f}%"
             )
         return
 
