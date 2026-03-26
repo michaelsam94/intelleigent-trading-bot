@@ -1015,6 +1015,7 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
     preplace = os.environ.get("TA_REAL_PREPLACE_EXITS", "1").strip().lower() in ("1", "true", "yes", "on")
     exit_mode = (os.environ.get("TA_REAL_EXIT_ORDER_MODE", "limit") or "limit").strip().lower()
     entry_id = f"ta_live_entry_{int(time.time())}"
+    preplace_ok = False
 
     def _place_exit_orders(qty_for_exit: float) -> bool:
         exit_side = "SELL" if side == "LONG" else "BUY"
@@ -1068,8 +1069,9 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
     if preplace:
         try:
             _place_exit_orders(qty)
+            preplace_ok = True
         except Exception:
-            pass
+            preplace_ok = False
 
     ord0 = client.futures_create_order(
         symbol=fut_symbol,
@@ -1110,12 +1112,13 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
         _tx("⚠️ LIVE entry not filled in time; canceled.")
         return
 
-    # Fallback: place exits now if pre-place failed / not used.
-    try:
-        _place_exit_orders(qty)
-    except Exception as e:
-        _tx(f"⚠️ LIVE entry filled but TP/SL placement failed: {e}")
-        return
+    # Fallback: place exits now only if not already pre-placed.
+    if not preplace_ok:
+        try:
+            _place_exit_orders(qty)
+        except Exception as e:
+            _tx(f"⚠️ LIVE entry filled but TP/SL placement failed: {e}")
+            return
     _tx(
         f"✅ LIVE {side} opened\n"
         f"Entry fill: {avg_fill:,.2f}\n"
