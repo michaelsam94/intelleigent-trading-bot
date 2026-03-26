@@ -127,7 +127,7 @@ def _apply_ta_preset() -> None:
     Align live TA-SIM with scripts/backtest_ta_signals.py --preset high-win-rate.
 
     Set TA_PRESET=high-win-rate (or TA_HIGH_WIN_RATE=1). Disable with TA_PRESET=none.
-    Values are written to os.environ so the rest of the script matches the backtest.
+    Uses setdefault: keys already set (e.g. from .env after _load_project_dotenv) are not overwritten.
     """
     name = _env_preset_name()
     if name != "high-win-rate":
@@ -146,7 +146,7 @@ def _apply_ta_preset() -> None:
         "TA_ENTRY_ON_SIGNAL_BANNER": "0",
     }
     for k, v in bundle.items():
-        os.environ[k] = v
+        os.environ.setdefault(k, v)
 
 
 import talib
