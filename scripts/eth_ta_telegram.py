@@ -844,7 +844,7 @@ def _round_to_step(v: float, step: float, up: bool = False) -> float:
     return float(r)
 
 
-def _futures_symbol_filters(client: Client, symbol: str) -> tuple[float, float, float]:
+def _futures_symbol_filters(client: Client, symbol: str) -> tuple[float, float, float, float]:
     ex = client.futures_exchange_info()
     for s in ex.get("symbols", []):
         if str(s.get("symbol", "")).upper() != symbol.upper():
@@ -852,6 +852,7 @@ def _futures_symbol_filters(client: Client, symbol: str) -> tuple[float, float, 
         tick = 0.0
         step = 0.0
         min_qty = 0.0
+        min_notional = 20.0
         for f in s.get("filters", []):
             ft = f.get("filterType")
             if ft == "PRICE_FILTER":
@@ -859,7 +860,11 @@ def _futures_symbol_filters(client: Client, symbol: str) -> tuple[float, float, 
             elif ft == "LOT_SIZE":
                 step = float(f.get("stepSize", "0") or 0)
                 min_qty = float(f.get("minQty", "0") or 0)
-        return tick, step, min_qty
+            elif ft in ("MIN_NOTIONAL", "NOTIONAL"):
+                mn = f.get("notional") or f.get("minNotional") or "0"
+                if float(mn or 0) > 0:
+                    min_notional = float(mn)
+        return tick, step, min_qty, min_notional
     raise ValueError(f"Futures symbol not found in exchange info: {symbol}")
 
 
@@ -881,6 +886,16 @@ def _futures_setup(client: Client, symbol: str, lev: int, isolated: bool = True)
     except Exception:
         pass
     client.futures_change_leverage(symbol=symbol, leverage=max(1, int(lev)))
+
+
+def _futures_available_usdt(client: Client) -> float:
+    try:
+        for r in client.futures_account_balance():
+            if str(r.get("asset", "")).upper() == "USDT":
+                return float(r.get("availableBalance", "0") or 0.0)
+    except Exception:
+        pass
+    return 0.0
 
 
 def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float] | None:
@@ -939,15 +954,23 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
     """Live Binance USD-M futures execution (env-gated)."""
     fut_symbol = os.environ.get("TA_FUTURES_SYMBOL", symbol).strip().upper()
     client = _client()
+    def _tx(msg: str) -> None:
+        if token and recipient_chat_ids({}):
+            broadcast_telegram_plain(token, msg, {})
+        print(msg, flush=True)
+
     dec = _decide_ta_entry(snap)
     if dec is None:
+        print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
         return
     side, close_price, tp_price, sl_price, lev = dec
     # one-position-only
-    if abs(_futures_position_amt(client, fut_symbol)) > 1e-12:
+    pos_amt = _futures_position_amt(client, fut_symbol)
+    if abs(pos_amt) > 1e-12:
+        print(f"LIVE skip: existing futures position amount on {fut_symbol}: {pos_amt}", flush=True)
         return
     _futures_setup(client, fut_symbol, int(lev), isolated=True)
-    tick, step, min_qty = _futures_symbol_filters(client, fut_symbol)
+    tick, step, min_qty, min_notional = _futures_symbol_filters(client, fut_symbol)
     order_book = client.futures_order_book(symbol=fut_symbol, limit=5)
     bid = float(order_book["bids"][0][0])
     ask = float(order_book["asks"][0][0])
@@ -960,14 +983,34 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
         raw_px = max(close_price, ask) * (1.0 + maker_bps / 10000.0)
         px = _round_to_step(raw_px, tick, up=True)
         entry_side = "SELL"
-    qty = _round_to_step(min_qty, step, up=True)
+    fixed_qty = float(os.environ.get("TA_REAL_FIXED_QTY", "0") or 0.0)
+    min_notional_qty = (min_notional / max(px, 1e-12)) if min_notional > 0 else 0.0
+    target_qty = fixed_qty if fixed_qty > 0 else max(min_qty, min_notional_qty)
+    qty = _round_to_step(target_qty, step, up=True)
     if qty <= 0:
+        print("LIVE skip: computed quantity is zero after step rounding.", flush=True)
         return
-
-    def _tx(msg: str) -> None:
-        if token and recipient_chat_ids({}):
-            broadcast_telegram_plain(token, msg, {})
-        print(msg, flush=True)
+    order_notional = qty * px
+    if min_notional > 0 and order_notional < min_notional:
+        qty = _round_to_step(min_notional / max(px, 1e-12), step, up=True)
+        order_notional = qty * px
+    if min_notional > 0 and order_notional < min_notional:
+        print(
+            f"LIVE skip: notional still below exchange min after rounding "
+            f"(notional={order_notional:.4f}, min={min_notional:.4f}).",
+            flush=True,
+        )
+        return
+    avail = _futures_available_usdt(client)
+    req_margin = order_notional / max(float(lev), 1e-12)
+    fee_buffer = order_notional * 0.0015  # conservative entry+exit + slippage buffer
+    if avail > 0 and avail < (req_margin + fee_buffer):
+        print(
+            f"LIVE skip: insufficient available USDT for order "
+            f"(avail={avail:.4f}, required~{req_margin + fee_buffer:.4f}).",
+            flush=True,
+        )
+        return
 
     preplace = os.environ.get("TA_REAL_PREPLACE_EXITS", "1").strip().lower() in ("1", "true", "yes", "on")
     entry_id = f"ta_live_entry_{int(time.time())}"
@@ -1003,7 +1046,7 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
     )
     _tx(
         f"📡 LIVE {side} LIMIT submitted\n"
-        f"Symbol: {fut_symbol} | Qty: {qty} | Limit: {px:,.2f}\n"
+        f"Symbol: {fut_symbol} | Qty: {qty} | Limit: {px:,.2f} | Notional: {order_notional:.2f}\n"
         f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x"
     )
     oid = int(ord0.get("orderId"))
