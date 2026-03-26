@@ -1013,25 +1013,61 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
         return
 
     preplace = os.environ.get("TA_REAL_PREPLACE_EXITS", "1").strip().lower() in ("1", "true", "yes", "on")
+    exit_mode = (os.environ.get("TA_REAL_EXIT_ORDER_MODE", "limit") or "limit").strip().lower()
     entry_id = f"ta_live_entry_{int(time.time())}"
+
+    def _place_exit_orders(qty_for_exit: float) -> bool:
+        exit_side = "SELL" if side == "LONG" else "BUY"
+        tp_stop = _round_to_step(tp_price, tick, up=(side == "LONG"))
+        sl_stop = _round_to_step(sl_price, tick, up=(side == "LONG"))
+        if exit_mode == "market":
+            client.futures_create_order(
+                symbol=fut_symbol,
+                side=exit_side,
+                type="TAKE_PROFIT_MARKET",
+                stopPrice=tp_stop,
+                closePosition=True,
+                workingType="MARK_PRICE",
+            )
+            client.futures_create_order(
+                symbol=fut_symbol,
+                side=exit_side,
+                type="STOP_MARKET",
+                stopPrice=sl_stop,
+                closePosition=True,
+                workingType="MARK_PRICE",
+            )
+            return True
+
+        # Limit exits: trigger + resting limit order (reduceOnly).
+        # Using price == stopPrice keeps behavior simple and explicit.
+        client.futures_create_order(
+            symbol=fut_symbol,
+            side=exit_side,
+            type="TAKE_PROFIT",
+            quantity=qty_for_exit,
+            price=tp_stop,
+            stopPrice=tp_stop,
+            timeInForce="GTC",
+            reduceOnly=True,
+            workingType="MARK_PRICE",
+        )
+        client.futures_create_order(
+            symbol=fut_symbol,
+            side=exit_side,
+            type="STOP",
+            quantity=qty_for_exit,
+            price=sl_stop,
+            stopPrice=sl_stop,
+            timeInForce="GTC",
+            reduceOnly=True,
+            workingType="MARK_PRICE",
+        )
+        return True
+
     if preplace:
         try:
-            client.futures_create_order(
-                symbol=fut_symbol,
-                side="SELL" if side == "LONG" else "BUY",
-                type="TAKE_PROFIT_MARKET",
-                stopPrice=_round_to_step(tp_price, tick, up=(side == "LONG")),
-                closePosition=True,
-                workingType="MARK_PRICE",
-            )
-            client.futures_create_order(
-                symbol=fut_symbol,
-                side="SELL" if side == "LONG" else "BUY",
-                type="STOP_MARKET",
-                stopPrice=_round_to_step(sl_price, tick, up=(side == "LONG")),
-                closePosition=True,
-                workingType="MARK_PRICE",
-            )
+            _place_exit_orders(qty)
         except Exception:
             pass
 
@@ -1076,29 +1112,14 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
 
     # Fallback: place exits now if pre-place failed / not used.
     try:
-        client.futures_create_order(
-            symbol=fut_symbol,
-            side="SELL" if side == "LONG" else "BUY",
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=_round_to_step(tp_price, tick, up=(side == "LONG")),
-            closePosition=True,
-            workingType="MARK_PRICE",
-        )
-        client.futures_create_order(
-            symbol=fut_symbol,
-            side="SELL" if side == "LONG" else "BUY",
-            type="STOP_MARKET",
-            stopPrice=_round_to_step(sl_price, tick, up=(side == "LONG")),
-            closePosition=True,
-            workingType="MARK_PRICE",
-        )
+        _place_exit_orders(qty)
     except Exception as e:
         _tx(f"⚠️ LIVE entry filled but TP/SL placement failed: {e}")
         return
     _tx(
         f"✅ LIVE {side} opened\n"
         f"Entry fill: {avg_fill:,.2f}\n"
-        f"TP(closePosition): {tp_price:,.2f} | SL(closePosition): {sl_price:,.2f}"
+        f"TP/SL mode: {exit_mode.upper()} | TP: {tp_price:,.2f} | SL: {sl_price:,.2f}"
     )
 
 
