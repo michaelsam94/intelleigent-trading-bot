@@ -41,6 +41,39 @@ def _load_eth_ta():
     return mod
 
 
+def _load_project_dotenv() -> None:
+    """Merge project root .env into os.environ (same precedence as live script)."""
+    p = _ROOT / ".env"
+    if not p.is_file():
+        return
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if raw.startswith("\ufeff"):
+        raw = raw[1:]
+    for line in raw.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        eq = line.index("=")
+        key = line[:eq].strip()
+        val = line[eq + 1 :].strip()
+        if val.startswith('"') and val.endswith('"'):
+            val = val[1:-1].replace('\\"', '"')
+        elif val.startswith("'") and val.endswith("'"):
+            val = val[1:-1].replace("\\'", "'")
+        if key:
+            os.environ[key] = val
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _ensure_close_time(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "close_time" in out.columns and not pd.api.types.is_datetime64_any_dtype(out["close_time"]):
@@ -389,11 +422,17 @@ def run_backtest(args: argparse.Namespace) -> dict:
 
 
 def main() -> int:
+    _load_project_dotenv()
+    filters_default = _env_bool("TA_SIGNAL_FILTERS", True)
+    open_every_default = _env_bool("TA_OPEN_EVERY_DIGEST", True)
+    preset_default = (os.environ.get("TA_PRESET") or "none").strip().lower()
+    if preset_default not in ("none", "conservative", "high-win-rate"):
+        preset_default = "none"
     p = argparse.ArgumentParser(
         description="Backtest TA signal strategy (eth_ta_telegram TA-SIM logic). "
         "TA_SIGNAL_FILTERS is on by default (15m/1h gates); use --no-filters for open-every-style entries.",
     )
-    p.set_defaults(filters=True)
+    p.set_defaults(filters=filters_default)
     p.add_argument(
         "--filters",
         action="store_true",
@@ -409,59 +448,96 @@ def main() -> int:
     p.add_argument(
         "--preset",
         choices=("none", "conservative", "high-win-rate"),
-        default="none",
+        default=preset_default,
         help="conservative: 2× lev, 48 bars, ATR TP/SL. high-win-rate: tight TP / wide SL margin + "
         "strong |score| gate (targets ~60%%+ win rate; expectancy may still need tuning)",
     )
     p.add_argument("--days", type=int, default=30, help="Lookback period in days (default 30)")
-    p.add_argument("--initial", type=float, default=10.0, help="Starting balance USDT (default 10)")
-    p.add_argument("--leverage", type=float, default=5.0, help="Leverage (default 5; high leverage + fees often dominates backtests)")
+    p.add_argument(
+        "--initial",
+        type=float,
+        default=float(os.environ.get("TA_STARTING_BALANCE", "10")),
+        help="Starting balance USDT (default TA_STARTING_BALANCE or 10)",
+    )
+    p.add_argument(
+        "--leverage",
+        type=float,
+        default=float(os.environ.get("TA_LEVERAGE", "5")),
+        help="Leverage (default TA_LEVERAGE or 5; high leverage + fees often dominates backtests)",
+    )
     p.add_argument(
         "--min-bars",
         type=int,
-        default=12,
-        help="Min 5m bars after a close before new entry (default 12 = 1h; reduces overtrading)",
+        default=int(os.environ.get("TA_MIN_BARS_BETWEEN_TRADES", "12")),
+        help="Min 5m bars after a close before new entry (default TA_MIN_BARS_BETWEEN_TRADES or 12)",
     )
-    p.add_argument("--symbol", type=str, default="", help="Binance spot symbol (default TA_SYMBOL or ETHUSDC)")
+    p.add_argument(
+        "--symbol",
+        type=str,
+        default=os.environ.get("TA_SYMBOL", "").strip().upper(),
+        help="Binance spot symbol (default TA_SYMBOL or ETHUSDC)",
+    )
     p.add_argument(
         "--mode",
         choices=("open-every", "threshold"),
-        default="open-every",
+        default="open-every" if open_every_default else "threshold",
         help="open-every: LONG if 5m score>=0 else SHORT (TA_OPEN_EVERY_DIGEST). "
         "threshold: LONG if score>=TA_LONG_ENTRY_SCORE, SHORT if <=TA_SHORT_ENTRY_SCORE.",
     )
-    p.add_argument("--fee-bps", type=float, default=4.0, help="Fee per side in bps (default 4)")
-    p.add_argument("--tp-price-pct", type=float, default=6.0, help="TP %% on margin when not using ATR")
-    p.add_argument("--sl-price-pct", type=float, default=2.5, help="SL %% on margin when not using ATR")
+    p.add_argument(
+        "--fee-bps",
+        type=float,
+        default=float(os.environ.get("TA_FEE_BPS_PER_SIDE", "4")),
+        help="Fee per side in bps (default TA_FEE_BPS_PER_SIDE or 4)",
+    )
+    p.add_argument(
+        "--tp-price-pct",
+        type=float,
+        default=float(os.environ.get("TA_TP_PRICE_PCT", "6")),
+        help="TP %% on margin when not using ATR (default TA_TP_PRICE_PCT or 6)",
+    )
+    p.add_argument(
+        "--sl-price-pct",
+        type=float,
+        default=float(os.environ.get("TA_SL_PRICE_PCT", "2.5")),
+        help="SL %% on margin when not using ATR (default TA_SL_PRICE_PCT or 2.5)",
+    )
     p.add_argument(
         "--underlying-tp-sl",
         action="store_true",
         help="TP/SL as underlying price %% (default: margin %% like TA_TP_SL_MARGIN_PCT=1)",
     )
-    p.add_argument("--use-atr", action="store_true", help="TA_TP_SL_USE_ATR=1 (ATR mults for TP/SL)")
+    p.add_argument(
+        "--use-atr",
+        action="store_true",
+        default=_env_bool("TA_TP_SL_USE_ATR", False),
+        help="TA_TP_SL_USE_ATR=1 (ATR mults for TP/SL)",
+    )
     p.add_argument(
         "--min-abs-score",
         type=float,
-        default=0.0,
+        default=float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0")),
         help="open-every only: only enter if 5m score >= this (LONG) or <= -this (SHORT). "
         "e.g. 2.5 skips weak direction; improves win rate with fewer trades.",
     )
     p.add_argument(
         "--sf-long-min",
         type=float,
-        default=None,
+        default=float(os.environ["TA_SF_LONG_MIN"]) if "TA_SF_LONG_MIN" in os.environ else None,
         metavar="N",
         help="When filters on: override TA_SF_LONG_MIN (stricter LONGs)",
     )
     p.add_argument(
         "--sf-short-max",
         type=float,
-        default=None,
+        default=float(os.environ["TA_SF_SHORT_MAX"]) if "TA_SF_SHORT_MAX" in os.environ else None,
         metavar="N",
         help="When filters on: override TA_SF_SHORT_MAX (stricter SHORTs)",
     )
     args = p.parse_args()
     args.margin_tp_sl = not args.underlying_tp_sl
+    if "TA_TP_SL_MARGIN_PCT" in os.environ and "--underlying-tp-sl" not in sys.argv[1:]:
+        args.margin_tp_sl = _env_bool("TA_TP_SL_MARGIN_PCT", True)
 
     argv = sys.argv[1:]
     if args.preset == "conservative":
