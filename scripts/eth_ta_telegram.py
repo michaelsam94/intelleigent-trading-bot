@@ -63,6 +63,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
     → TA_TP_SL_USE_ATR=0 TA_SF_LONG_MIN=2.5 TA_SF_SHORT_MAX=-2.5 TA_OPEN_EVERY_MIN_ABS_SCORE=2.2
     → TA_SIGNAL_FILTERS=1 TA_ENTRY_ON_SIGNAL_BANNER=0
   TA_OPEN_EVERY_MIN_ABS_SCORE=0   # when TA_OPEN_EVERY_DIGEST=1: only LONG if 5m score >= N, SHORT if <= -N; 0 = sign-only
+  TA_OPEN_EVERY_STRONG_5M_ONLY=0  # when 1: open-every only if 5m label is Strong Buy (LONG) or Strong Sell (SHORT); ignores min-abs gate
 """
 from __future__ import annotations
 
@@ -961,19 +962,29 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     if open_every:
         sc5 = snap.score_5m
-        try:
-            min_abs = float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0"))
-        except ValueError:
-            min_abs = 0.0
-        if min_abs > 0:
-            if sc5 >= min_abs:
+        lab5 = (snap.label_5m or "").strip()
+        strong_5m_only = _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0")
+        if strong_5m_only:
+            if lab5 == "Strong Buy":
                 side = "LONG"
-            elif sc5 <= -min_abs:
+            elif lab5 == "Strong Sell":
                 side = "SHORT"
             else:
                 side = ""
         else:
-            side = "LONG" if sc5 >= 0 else "SHORT"
+            try:
+                min_abs = float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0"))
+            except ValueError:
+                min_abs = 0.0
+            if min_abs > 0:
+                if sc5 >= min_abs:
+                    side = "LONG"
+                elif sc5 <= -min_abs:
+                    side = "SHORT"
+                else:
+                    side = ""
+            else:
+                side = "LONG" if sc5 >= 0 else "SHORT"
         if not side:
             return
         tp_price, sl_price, _tp_sl_mode = _fixed_tp_sl_levels(
@@ -992,7 +1003,12 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
             )
         else:
             tp_sl_txt = f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
-        open_extra = f"5m TA score {sc5:+.4f} | open each digest when flat | {tp_sl_txt}"
+        if strong_5m_only:
+            open_extra = (
+                f"5m label {lab5} (score {sc5:+.4f}) | Strong 5m only | {tp_sl_txt}"
+            )
+        else:
+            open_extra = f"5m TA score {sc5:+.4f} | open each digest when flat | {tp_sl_txt}"
     elif entry_on_banner and not open_every:
         bs = _banner_entry_side(snap.banner)
         if bs:
