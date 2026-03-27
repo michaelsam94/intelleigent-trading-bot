@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any
 
@@ -54,17 +55,71 @@ def _to_float_or_none(v: Any) -> float | None:
         return None
 
 
+def _extract_first_json_object(text: str) -> str | None:
+    """First balanced `{ ... }` block (handles nested objects; avoids greedy-regex bugs)."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    quote: str | None = None
+    i = start
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if in_str and quote is not None:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == quote:
+                in_str = False
+                quote = None
+        else:
+            if c in ('"', "'"):
+                in_str = True
+                quote = c
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1].strip()
+        i += 1
+    return None
+
+
+def _json_loose_fixes(s: str) -> str:
+    """Best-effort fixes for model JSON (trailing commas, etc.)."""
+    s = s.strip()
+    # Remove trailing commas before } or ]
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r",(\s*})", r"\1", s)
+        s = re.sub(r",(\s*])", r"\1", s)
+    return s
+
+
 def _strip_json_from_response(text: str) -> str | None:
     text = text.strip()
+    if not text:
+        return None
     if "```" in text:
-        m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+        m = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text, re.I)
         if m:
-            return m.group(1).strip()
+            inner = m.group(1).strip()
+            blob = _extract_first_json_object(inner) or inner
+            return blob
     try:
         json.loads(text)
         return text
     except json.JSONDecodeError:
         pass
+    blob = _extract_first_json_object(text)
+    if blob:
+        return blob
     m = re.search(r"\{[\s\S]*\}", text)
     return m.group(0).strip() if m else None
 
@@ -184,15 +239,24 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
     s = _strip_json_from_response(raw)
     if not s:
         return None
-    try:
-        data = json.loads(s)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
+    data: Any = None
+    for candidate in (s, _json_loose_fixes(s)):
+        try:
+            data = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+    if data is None or not isinstance(data, dict):
         return None
     action = str(data.get("action", "HOLD")).upper().strip()
     if action not in ("LONG", "SHORT", "HOLD"):
         action = "HOLD"
+    if action == "HOLD":
+        ddir = str(data.get("direction", "") or "").strip().lower()
+        if ddir in ("long", "short"):
+            action = ddir.upper()
+        elif ddir in ("neutral", "hold", ""):
+            pass
     tp = data.get("take_profit")
     sl = data.get("stop_loss")
     try:
@@ -206,14 +270,21 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
     tp1 = _to_float_or_none(data.get("tp1"))
     if tp_f is None and tp1 is not None:
         tp_f = tp1
+
+    def _safe_int(v: Any, default: int = 0) -> int:
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
     return {
         "action": action,
         "take_profit": tp_f,
         "stop_loss": sl_f,
-        "confidence": int(data.get("confidence", 0) or 0),
+        "confidence": _safe_int(data.get("confidence", 0), 0),
         "rationale": str(data.get("rationale", "") or ""),
         "direction": str(data.get("direction", "") or ""),
-        "conviction_score": int(data.get("conviction_score", 0) or 0),
+        "conviction_score": _safe_int(data.get("conviction_score", 0), 0),
         "entry_low": _to_float_or_none(data.get("entry_low")),
         "entry_high": _to_float_or_none(data.get("entry_high")),
         "tp1": _to_float_or_none(data.get("tp1")),
@@ -265,7 +336,9 @@ def gemini_trade_decision(
 
     def _call_old_sdk_once() -> str:
         try:
-            import google.generativeai as genai  # type: ignore
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                import google.generativeai as genai  # type: ignore
         except ImportError:
             return ""
 
@@ -303,7 +376,9 @@ def gemini_trade_decision(
             parsed = parse_gemini_trade_json(text_new)
             if parsed is not None:
                 return parsed
-            print("Gemini: new SDK text did not parse as JSON; trying legacy SDK", flush=True)
+            snip = text_new[:500].replace("\n", " ")
+            print(f"Gemini: new SDK text did not parse as JSON; sample={snip!r}", flush=True)
+            print("Gemini: trying legacy SDK", flush=True)
 
         try:
             text_old = _run_with_timeout(_call_old_sdk_once)
@@ -317,6 +392,8 @@ def gemini_trade_decision(
             parsed = parse_gemini_trade_json(text_old)
             if parsed is not None:
                 return parsed
+            snip = text_old[:500].replace("\n", " ")
+            print(f"Gemini: legacy SDK text did not parse; sample={snip!r}", flush=True)
 
         print("Gemini: empty or unparseable response from both SDKs", flush=True)
         return None
