@@ -1006,11 +1006,13 @@ def _decide_ta_entry(
     snap: TASnapshot,
     *,
     gemini_dec: dict[str, Any] | None = None,
+    gemini_shared_ran: bool = False,
 ) -> tuple[str, float, float, float, float] | None:
     """
     Decide entry from current TA logic.
     Returns (side, close_price, tp_price, sl_price, lev) or None.
     If gemini_dec is provided (shared per-cycle call), live Gemini path uses it instead of a new API request.
+    If gemini_shared_ran is True and gemini_dec is None, do not call Gemini again (quota already spent).
     """
     if snap.df_5m is None or len(snap.df_5m) < 60:
         return None
@@ -1060,7 +1062,7 @@ def _decide_ta_entry(
             side = "SHORT"
     if not side and use_gemini_live:
         dec = gemini_dec
-        if dec is None:
+        if dec is None and not gemini_shared_ran:
             try:
                 dec = run_gemini_decision(
                     os.environ.get("TA_FUTURES_SYMBOL", os.environ.get("TA_SYMBOL", "ETHUSDC")).strip().upper(),
@@ -1073,6 +1075,11 @@ def _decide_ta_entry(
                 )
             except Exception as e:
                 print(f"LIVE Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+        elif dec is None and gemini_shared_ran:
+            print(
+                "LIVE Gemini: shared call had no usable decision — skipping duplicate API (quota)",
+                flush=True,
+            )
         if dec:
             action = str(dec.get("action", "HOLD")).upper()
             if action in ("LONG", "SHORT"):
@@ -1117,6 +1124,7 @@ def process_ta_trade_live_futures(
     token: str,
     *,
     gemini_dec: dict[str, Any] | None = None,
+    gemini_shared_ran: bool = False,
 ) -> None:
     """Live Binance USD-M futures execution (env-gated)."""
     fut_symbol = os.environ.get("TA_FUTURES_SYMBOL", symbol).strip().upper()
@@ -1132,7 +1140,7 @@ def process_ta_trade_live_futures(
         print(f"LIVE skip: existing futures position amount on {fut_symbol}: {pos_amt}", flush=True)
         return
 
-    dec = _decide_ta_entry(snap, gemini_dec=gemini_dec)
+    dec = _decide_ta_entry(snap, gemini_dec=gemini_dec, gemini_shared_ran=gemini_shared_ran)
     if dec is None:
         print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
         return
@@ -1306,6 +1314,7 @@ def process_ta_trade_sim(
     token: str,
     *,
     gemini_dec: dict[str, Any] | None = None,
+    gemini_shared_ran: bool = False,
 ) -> None:
     """Paper trade from mean TA score; TP/SL/fees same as ML trader_simulation defaults."""
     if snap.df_5m is None or len(snap.df_5m) < 60:
@@ -1539,7 +1548,7 @@ def process_ta_trade_sim(
             print("Gemini enabled but GEMINI_API_KEY is empty — falling back to TA score entry", flush=True)
         else:
             dec = gemini_dec
-            if dec is None:
+            if dec is None and not gemini_shared_ran:
                 try:
                     dec = run_gemini_decision(
                         symbol,
@@ -1552,6 +1561,8 @@ def process_ta_trade_sim(
                     )
                 except Exception as e:
                     print(f"Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+            elif dec is None and gemini_shared_ran:
+                print("TA-SIM Gemini: shared call had no usable decision — skipping duplicate API", flush=True)
             if dec:
                 action = str(dec.get("action", "HOLD")).upper()
                 if action in ("LONG", "SHORT"):
@@ -1682,6 +1693,7 @@ def _build_gemini_signal_block(
     precomputed: dict[str, Any] | None = None,
     trade_sim: bool = False,
     trade_live: bool = False,
+    gemini_shared_ran: bool = False,
 ) -> str:
     """Optional digest section: Gemini direction + execution levels each cycle."""
     if _gemini_api_paused(symbol, trade_sim, trade_live):
@@ -1690,6 +1702,11 @@ def _build_gemini_signal_block(
         return "🤖 Gemini signal: unavailable (insufficient 5m data)"
     close_price = float(snap.df_5m["close"].iloc[-1])
     dec = precomputed
+    if dec is None and gemini_shared_ran:
+        return (
+            "🤖 Gemini signal: unavailable (shared call returned no parseable JSON; "
+            "check quota/429 or model name — see PM2 logs)"
+        )
     if dec is None:
         try:
             dec = run_gemini_decision(
@@ -1839,12 +1856,14 @@ def main() -> int:
                 msg = snap.banner + "\n\n" + msg
 
             gemini_dec: dict[str, Any] | None = None
+            gemini_shared_ran = False
             if (
                 _gemini_entries_env_enabled()
                 and not _gemini_api_paused(symbol, trade_sim, trade_live)
                 and _gemini_cycle_needs_api(symbol, trade_sim, trade_live)
                 and _gemini_single_call_per_cycle_enabled()
             ):
+                gemini_shared_ran = True
                 try:
                     gemini_dec = _run_shared_gemini_decision(symbol, snap)
                     if gemini_dec:
@@ -1860,6 +1879,7 @@ def main() -> int:
                     precomputed=gemini_dec if _gemini_single_call_per_cycle_enabled() else None,
                     trade_sim=trade_sim,
                     trade_live=trade_live,
+                    gemini_shared_ran=gemini_shared_ran and _gemini_single_call_per_cycle_enabled(),
                 )
             if trade_sim:
                 process_ta_trade_sim(
@@ -1867,6 +1887,7 @@ def main() -> int:
                     snap,
                     token,
                     gemini_dec=gemini_dec if _gemini_single_call_per_cycle_enabled() else None,
+                    gemini_shared_ran=gemini_shared_ran and _gemini_single_call_per_cycle_enabled(),
                 )
             elif trade_live:
                 process_ta_trade_live_futures(
@@ -1874,6 +1895,7 @@ def main() -> int:
                     snap,
                     token,
                     gemini_dec=gemini_dec if _gemini_single_call_per_cycle_enabled() else None,
+                    gemini_shared_ran=gemini_shared_ran and _gemini_single_call_per_cycle_enabled(),
                 )
             elif not _suppress_trade_sim_digest_hint():
                 msg += (

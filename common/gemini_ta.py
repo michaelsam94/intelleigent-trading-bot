@@ -6,8 +6,45 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any
+
+
+def _extract_text_from_genai_response(resp: Any) -> str:
+    """Get assistant text from google.genai or google.generativeai response objects."""
+    if resp is None:
+        return ""
+    t = getattr(resp, "text", None)
+    if isinstance(t, str) and t.strip():
+        return t.strip()
+    cands = getattr(resp, "candidates", None) or []
+    for cand in cands:
+        content = getattr(cand, "content", None)
+        if content is None:
+            continue
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            pt = getattr(part, "text", None)
+            if isinstance(pt, str) and pt.strip():
+                return pt.strip()
+    return ""
+
+
+def _retry_delay_seconds_from_error(err: BaseException) -> float | None:
+    s = str(err)
+    m = re.search(r"retry in ([0-9.]+)s", s, re.I)
+    if m:
+        return float(m.group(1))
+    m2 = re.search(r"retry_delay\s*\{[^}]*seconds:\s*([0-9]+)", s)
+    if m2:
+        return float(m2.group(1))
+    return None
+
+
+def _is_rate_limit_error(err: BaseException) -> bool:
+    s = str(err).lower()
+    return "429" in s or "resource_exhausted" in s or "quota" in s and "exceed" in s
 
 
 def _to_float_or_none(v: Any) -> float | None:
@@ -151,6 +188,8 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
         data = json.loads(s)
     except json.JSONDecodeError:
         return None
+    if not isinstance(data, dict):
+        return None
     action = str(data.get("action", "HOLD")).upper().strip()
     if action not in ("LONG", "SHORT", "HOLD"):
         action = "HOLD"
@@ -195,8 +234,9 @@ def gemini_trade_decision(
     api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
         return None
-    timeout_s = float(os.environ.get("TA_GEMINI_TIMEOUT_SEC", "20") or 20.0)
+    timeout_s = float(os.environ.get("TA_GEMINI_TIMEOUT_SEC", "45") or 45.0)
     model_name = (os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+    max_429_retries = int(float(os.environ.get("TA_GEMINI_429_RETRIES", "3") or 3))
 
     def _run_with_timeout(fn):
         with ThreadPoolExecutor(max_workers=1) as ex:
@@ -206,57 +246,80 @@ def gemini_trade_decision(
             except FuturesTimeoutError as e:
                 raise RuntimeError(f"Gemini request timed out after {timeout_s:.1f}s") from e
 
-    # Prefer new SDK, then fall back to deprecated SDK for compatibility.
-    try:
+    def _call_new_sdk_once() -> str:
         from google import genai as genai_new  # type: ignore
 
-        def _call_new_sdk():
-            client = genai_new.Client(api_key=api_key)
-            cfg = {
+        client = genai_new.Client(api_key=api_key)
+        cfg: dict[str, Any] = {
+            "temperature": 0.2,
+            "max_output_tokens": 1024,
+        }
+        if system_instruction:
+            cfg["system_instruction"] = system_instruction
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=full_user_prompt,
+            config=cfg,
+        )
+        return _extract_text_from_genai_response(resp)
+
+    def _call_old_sdk_once() -> str:
+        try:
+            import google.generativeai as genai  # type: ignore
+        except ImportError:
+            return ""
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name,
+            system_instruction=system_instruction or "You output only valid JSON.",
+        )
+        resp = model.generate_content(
+            full_user_prompt,
+            generation_config={
                 "temperature": 0.2,
                 "max_output_tokens": 1024,
-            }
-            if system_instruction:
-                cfg["system_instruction"] = system_instruction
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=full_user_prompt,
-                config=cfg,
-            )
-            return (getattr(resp, "text", "") or "").strip()
+            },
+        )
+        return _extract_text_from_genai_response(resp)
 
-        text = _run_with_timeout(_call_new_sdk)
-        if text:
-            parsed = parse_gemini_trade_json(text)
+    def _sleep_for_429(err: BaseException) -> None:
+        delay = _retry_delay_seconds_from_error(err)
+        wait_s = min((delay or 40.0) + 2.0, 120.0)
+        print(f"Gemini rate limit — sleeping {wait_s:.0f}s before retry", flush=True)
+        time.sleep(wait_s)
+
+    for attempt in range(max_429_retries + 1):
+        text_new = ""
+        try:
+            text_new = _run_with_timeout(_call_new_sdk_once)
+        except Exception as e:
+            if _is_rate_limit_error(e) and attempt < max_429_retries:
+                _sleep_for_429(e)
+                continue
+            print(f"Gemini new SDK error: {e} — trying legacy SDK", flush=True)
+
+        if text_new:
+            parsed = parse_gemini_trade_json(text_new)
             if parsed is not None:
                 return parsed
-    except Exception:
-        pass
+            print("Gemini: new SDK text did not parse as JSON; trying legacy SDK", flush=True)
 
-    try:
-        import google.generativeai as genai  # type: ignore
-    except ImportError:
-        raise RuntimeError("Install google-genai (preferred) or google-generativeai") from None
+        try:
+            text_old = _run_with_timeout(_call_old_sdk_once)
+        except Exception as e:
+            if _is_rate_limit_error(e) and attempt < max_429_retries:
+                _sleep_for_429(e)
+                continue
+            raise RuntimeError(f"Gemini API error: {e}") from e
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name, system_instruction=system_instruction or "You output only valid JSON.")
-    try:
-        def _call_old_sdk():
-            resp = model.generate_content(
-                full_user_prompt,
-                generation_config={
-                    "temperature": 0.2,
-                    "max_output_tokens": 1024,
-                },
-            )
-            return (resp.text or "").strip()
-        text = _run_with_timeout(_call_old_sdk)
-    except Exception as e:
-        raise RuntimeError(f"Gemini API error: {e}") from e
+        if text_old:
+            parsed = parse_gemini_trade_json(text_old)
+            if parsed is not None:
+                return parsed
 
-    if not text:
+        print("Gemini: empty or unparseable response from both SDKs", flush=True)
         return None
-    return parse_gemini_trade_json(text)
 
 
 def run_gemini_decision(
