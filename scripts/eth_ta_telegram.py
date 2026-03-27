@@ -395,22 +395,32 @@ def _parse_gemini_entry_zone(dec: dict[str, Any]) -> tuple[float, float] | None:
     return (fl, fh)
 
 
-def _reference_price_in_entry_zone(side: str, close: float, el: float, eh: float) -> float:
-    """Anchor limit math to Gemini zone: do not use raw close when it is outside the band."""
-    s = (side or "").strip().upper()
-    if s == "SHORT":
-        if close < el:
-            return el
-        if close > eh:
-            return eh
-        return close
-    if s == "LONG":
-        if close > eh:
-            return eh
-        if close < el:
-            return el
-        return close
-    return close
+def _gemini_zone_entry_target(close: float, el: float, eh: float) -> float:
+    """
+    Pick a limit anchor strictly inside [el, eh]: last close when already in the zone,
+    else a point between low and high (default: midpoint). TA_GEMINI_ZONE_LIMIT_FRAC: 0=low, 1=high.
+    """
+    if eh - el < 1e-12:
+        return el
+    if el <= close <= eh:
+        return min(max(close, el), eh)
+    pos = float(os.environ.get("TA_GEMINI_ZONE_LIMIT_FRAC", "0.5") or 0.5)
+    pos = min(max(pos, 0.0), 1.0)
+    return el + pos * (eh - el)
+
+
+def _limit_price_from_zone_target(
+    side: str, target: float, el: float, eh: float, tick: float, maker_bps: float
+) -> float:
+    """Maker nudge from in-zone target, then clamp to band (does not use bid/ask — keeps order in zone)."""
+    bps = maker_bps / 10000.0
+    if side == "LONG":
+        raw = float(target) * (1.0 - bps)
+        px = _round_to_step(raw, tick, up=False)
+    else:
+        raw = float(target) * (1.0 + bps)
+        px = _round_to_step(raw, tick, up=True)
+    return _clamp_limit_price_to_zone(px, el, eh, tick, side)
 
 
 def _clamp_limit_price_to_zone(px: float, el: float, eh: float, tick: float, side: str) -> float:
@@ -1156,7 +1166,7 @@ def _decide_ta_entry(
                         if z:
                             live_gemini_zone = z
                             print(
-                                f"LIVE Gemini entry zone: {z[0]:,.2f}–{z[1]:,.2f} (limit will respect band)",
+                                f"LIVE Gemini entry zone: {z[0]:,.2f}–{z[1]:,.2f} (limit inside band)",
                                 flush=True,
                             )
                     print(
@@ -1231,18 +1241,18 @@ def process_ta_trade_live_futures(
     ref_price = close_price
     if gemini_zone is not None:
         el, eh = gemini_zone
-        ref_price = _reference_price_in_entry_zone(side, close_price, el, eh)
-    if side == "LONG":
-        raw_px = min(ref_price, bid) * (1.0 - maker_bps / 10000.0)
-        px = _round_to_step(raw_px, tick, up=False)
-        entry_side = "BUY"
+        ref_price = _gemini_zone_entry_target(close_price, el, eh)
+        px = _limit_price_from_zone_target(side, ref_price, el, eh, tick, maker_bps)
+        entry_side = "BUY" if side == "LONG" else "SELL"
     else:
-        raw_px = max(ref_price, ask) * (1.0 + maker_bps / 10000.0)
-        px = _round_to_step(raw_px, tick, up=True)
-        entry_side = "SELL"
-    if gemini_zone is not None:
-        el, eh = gemini_zone
-        px = _clamp_limit_price_to_zone(px, el, eh, tick, side)
+        if side == "LONG":
+            raw_px = min(ref_price, bid) * (1.0 - maker_bps / 10000.0)
+            px = _round_to_step(raw_px, tick, up=False)
+            entry_side = "BUY"
+        else:
+            raw_px = max(ref_price, ask) * (1.0 + maker_bps / 10000.0)
+            px = _round_to_step(raw_px, tick, up=True)
+            entry_side = "SELL"
     fixed_qty = float(os.environ.get("TA_REAL_FIXED_QTY", "0") or 0.0)
     min_notional_qty = (min_notional / max(px, 1e-12)) if min_notional > 0 else 0.0
     target_qty = fixed_qty if fixed_qty > 0 else max(min_qty, min_notional_qty)
@@ -1276,6 +1286,16 @@ def process_ta_trade_live_futures(
     exit_mode = (os.environ.get("TA_REAL_EXIT_ORDER_MODE", "limit") or "limit").strip().lower()
     entry_id = f"ta_live_entry_{int(time.time())}"
     preplace_ok = False
+    base_entry_wait = int(float(os.environ.get("TA_REAL_ENTRY_TIMEOUT_SEC", "20")))
+    if gemini_zone is not None:
+        zone_wait_raw = os.environ.get("TA_REAL_ENTRY_TIMEOUT_ZONE_SEC", "").strip()
+        if zone_wait_raw:
+            entry_wait_sec = int(float(zone_wait_raw))
+        else:
+            zone_floor = int(float(os.environ.get("TA_REAL_ENTRY_TIMEOUT_ZONE_MIN_SEC", "180")))
+            entry_wait_sec = max(base_entry_wait, zone_floor)
+    else:
+        entry_wait_sec = base_entry_wait
 
     def _place_exit_orders(qty_for_exit: float) -> bool:
         exit_side = "SELL" if side == "LONG" else "BUY"
@@ -1345,15 +1365,19 @@ def process_ta_trade_live_futures(
     zone_line = ""
     if gemini_zone is not None:
         zl, zh = gemini_zone
-        zone_line = f"Gemini zone: {zl:,.2f}–{zh:,.2f} | ref {close_price:,.2f} → limit anchor {ref_price:,.2f}\n"
+        zone_line = (
+            f"Gemini zone: {zl:,.2f}–{zh:,.2f} | close {close_price:,.2f} → in-zone target {ref_price:,.2f}\n"
+        )
     _tx(
         f"📡 LIVE {side} LIMIT submitted\n"
         f"{zone_line}"
         f"Symbol: {fut_symbol} | Qty: {qty} | Limit: {px:,.2f} | Notional: {order_notional:.2f}\n"
-        f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x"
+        f"Entry fill wait: {entry_wait_sec}s"
+        + (" (Gemini zone)\n" if gemini_zone is not None else "\n")
+        + f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x"
     )
     oid = int(ord0.get("orderId"))
-    timeout_s = int(float(os.environ.get("TA_REAL_ENTRY_TIMEOUT_SEC", "20")))
+    timeout_s = entry_wait_sec
     start = time.time()
     filled = False
     avg_fill = px

@@ -25,7 +25,7 @@ Digest-only mode (no trades) is the default when **`TA_TRADE_SIM`** is unset or 
 
 - `TA_REAL_TRADING=1` and `TA_REAL_CONFIRM=I_UNDERSTAND` are both required.
 - Uses **one-way** mode, sets **isolated margin**, applies `TA_LEVERAGE`.
-- Entry uses a **LIMIT** order near top-of-book (maker-biased by `TA_REAL_ENTRY_MAKER_OFFSET_BPS`).
+- Entry uses a **LIMIT** order near top-of-book (maker-biased by `TA_REAL_ENTRY_MAKER_OFFSET_BPS`). With **Gemini entry zone**, the limit is priced **inside** `entry_low`–`entry_high` (close if already in the band, else a point along the band — default **mid** via `TA_GEMINI_ZONE_LIMIT_FRAC`); fills may take longer, so the wait defaults to **`max(TA_REAL_ENTRY_TIMEOUT_SEC, TA_REAL_ENTRY_TIMEOUT_ZONE_MIN_SEC)`** (see below).
 - Tries to pre-place TP/SL close-position orders (`TA_REAL_PREPLACE_EXITS=1`), then falls back to placing them immediately after entry fill.
 - Uses minimum exchange quantity for initial live test.
 
@@ -38,6 +38,8 @@ TA_FUTURES_SYMBOL=ETHUSDC
 TA_REAL_ENTRY_MAKER_OFFSET_BPS=1.0
 TA_REAL_PREPLACE_EXITS=1
 TA_REAL_ENTRY_TIMEOUT_SEC=20
+# With Gemini entry zone, fill wait defaults to max( above , TA_REAL_ENTRY_TIMEOUT_ZONE_MIN_SEC ) — default 180s in code.
+# Override: TA_REAL_ENTRY_TIMEOUT_ZONE_SEC=300  (fixed wait whenever zone is used)
 TA_REVERSE_SIGNALS=0
 ```
 
@@ -128,7 +130,8 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_GEMINI_OVERRIDE_OPEN_EVERY`** | **`0`** | Set to **`1`** to let live Gemini entry logic run even when `TA_OPEN_EVERY_DIGEST=1` (otherwise open-every mode bypasses Gemini for entry). |
 | **`TA_GEMINI_LIVE_NO_TA_FALLBACK`** | **`1`** | **`1`** = when **`TA_GEMINI_FOR_LIVE=1`**, live entries use **only** Gemini (no direction from open-every or TA score if Gemini fails). Set **`0`** to allow TA-first behavior again. |
 | **`TA_GEMINI_MASTER_PROMPT`** | **`0`** | Set to **`1`** to use the Master TA prompt format (direction, conviction, entry zone, TP/SL, invalidation fields). |
-| **`TA_GEMINI_USE_ENTRY_ZONE`** | **`1`** | When **`1`** and Gemini returns **`entry_low` / `entry_high`**, live **limit** orders anchor inside that band instead of using only the last close. |
+| **`TA_GEMINI_USE_ENTRY_ZONE`** | **`1`** | When **`1`** and Gemini returns **`entry_low` / `entry_high`**, the live **limit** price is set **inside that band** (last close if price is already in the zone; otherwise a point along the band, see **`TA_GEMINI_ZONE_LIMIT_FRAC`**). |
+| **`TA_GEMINI_ZONE_LIMIT_FRAC`** | **`0.5`** | When price is **outside** the Gemini entry zone, target = **`entry_low + frac × (entry_high − entry_low)`** (`0` = low, `1` = high, **`0.5`** = midpoint). Ignored when close is already between low and high. |
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
 | **`TA_GEMINI_TIMEOUT_SEC`** | **`45`** | Gemini request timeout in seconds (per SDK attempt). |
 | **`TA_GEMINI_429_RETRIES`** | **`3`** | On HTTP 429 / quota backoff, sleep and retry up to this many extra attempts. |
@@ -227,7 +230,8 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_FOR_LIVE` | `0` | `1` = live futures path can use Gemini action + TP/SL (fallback to TA logic if Gemini fails/returns HOLD) |
 | `TA_GEMINI_OVERRIDE_OPEN_EVERY` | `0` | `1` = do not bypass live Gemini entries when `TA_OPEN_EVERY_DIGEST=1` |
 | `TA_GEMINI_LIVE_NO_TA_FALLBACK` | `1` | `1` = live trades require Gemini (no TA fallback when Gemini fails) |
-| `TA_GEMINI_USE_ENTRY_ZONE` | `1` | `1` = live **limit** price respects Gemini `entry_low` / `entry_high` when both are present (Master prompt); `0` = anchor limit on last close only |
+| `TA_GEMINI_USE_ENTRY_ZONE` | `1` | `1` = live **limit** inside Gemini `entry_low`–`entry_high` when both set; `0` = use last close + book only |
+| `TA_GEMINI_ZONE_LIMIT_FRAC` | `0.5` | In-zone target along the band when close is outside the zone (`0`=low, `0.5`=mid, `1`=high) |
 | `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = use Master TA prompt JSON schema (direction/conviction/entry zone/invalidation + action/TP/SL) |
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
 | `TA_GEMINI_TIMEOUT_SEC` | `45` | Gemini API timeout in seconds (per attempt) |
