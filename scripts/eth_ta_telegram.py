@@ -259,6 +259,16 @@ def _gemini_entries_env_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _gemini_live_entries_enabled() -> bool:
+    """Whether live futures path may use Gemini direction/TP/SL (opt-in)."""
+    return _gemini_entries_env_enabled() and _sf_sub("TA_GEMINI_FOR_LIVE", "0")
+
+
+def _gemini_signal_digest_enabled() -> bool:
+    """Whether to append a Gemini signal section to every 5m digest."""
+    return _gemini_entries_env_enabled() and _sf_sub("TA_GEMINI_SIGNAL_EVERY_DIGEST", "0")
+
+
 def _signal_filters_enabled() -> bool:
     """Stricter TA-SIM entry gates (score band, ADX/MACD, higher-TF trend)."""
     return os.environ.get("TA_SIGNAL_FILTERS", "1").strip().lower() in ("1", "true", "yes", "on")
@@ -941,10 +951,13 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
     long_min = float(os.environ.get("TA_LONG_ENTRY_SCORE", "0.8"))
     short_max = float(os.environ.get("TA_SHORT_ENTRY_SCORE", "-0.8"))
     side = ""
+    tp_price = 0.0
+    sl_price = 0.0
     open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
     atr_sig = _atr_from_df(df)
+    use_gemini_live = _gemini_live_entries_enabled() and not open_every
     if open_every:
         sc5 = snap.score_5m
         lab5 = (snap.label_5m or "").strip()
@@ -971,14 +984,46 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
             side = "LONG"
         elif want_short and not want_long:
             side = "SHORT"
+    if not side and use_gemini_live:
+        dec = None
+        try:
+            dec = run_gemini_decision(
+                os.environ.get("TA_FUTURES_SYMBOL", os.environ.get("TA_SYMBOL", "ETHUSDC")).strip().upper(),
+                close_price,
+                snap.text,
+                snap.tf_scores,
+                snap.tf_labels,
+                snap.score_for_entry,
+                aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+            )
+        except Exception as e:
+            print(f"LIVE Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+        if dec:
+            action = str(dec.get("action", "HOLD")).upper()
+            if action in ("LONG", "SHORT"):
+                tp_raw = dec.get("take_profit")
+                sl_raw = dec.get("stop_loss")
+                tp_v, sl_v = validate_tp_sl(action, close_price, tp_raw, sl_raw)
+                side = action
+                if tp_v is not None and sl_v is not None:
+                    tp_price, sl_price = tp_v, sl_v
+                else:
+                    tp_price, sl_price, _ = _fixed_tp_sl_levels(
+                        side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
+                    )
     if not side:
         return None
-    if _reverse_signals_enabled():
-        side = _opposite_side(side)
+    reverse_on = _reverse_signals_enabled()
+    if reverse_on:
+        if tp_price > 0 and sl_price > 0:
+            side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
+        else:
+            side = _opposite_side(side)
     ok, _reason = _entry_filters_pass(snap, side, df)
     if not ok:
         return None
-    tp_price, sl_price, _ = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig)
+    if tp_price <= 0 or sl_price <= 0:
+        tp_price, sl_price, _ = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig)
     return side, close_price, tp_price, sl_price, lev
 
 
@@ -1535,6 +1580,51 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     )
 
 
+def _build_gemini_signal_block(symbol: str, snap: TASnapshot) -> str:
+    """Optional digest section: Gemini direction + execution levels each cycle."""
+    if snap.df_5m is None or len(snap.df_5m) < 2:
+        return "🤖 Gemini signal: unavailable (insufficient 5m data)"
+    close_price = float(snap.df_5m["close"].iloc[-1])
+    try:
+        dec = run_gemini_decision(
+            symbol,
+            close_price,
+            snap.text,
+            snap.tf_scores,
+            snap.tf_labels,
+            snap.score_for_entry,
+            aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+        )
+    except Exception as e:
+        return f"🤖 Gemini signal: unavailable ({e})"
+    if not dec:
+        return "🤖 Gemini signal: unavailable (empty response)"
+    action = str(dec.get("action", "HOLD")).upper()
+    direction = str(dec.get("direction", "") or "").strip() or ("Neutral" if action == "HOLD" else action.title())
+    conviction = int(dec.get("conviction_score", 0) or 0)
+    conf = int(dec.get("confidence", 0) or 0)
+    el = dec.get("entry_low")
+    eh = dec.get("entry_high")
+    tp = dec.get("take_profit")
+    sl = dec.get("stop_loss")
+    tp2 = dec.get("tp2")
+    inv = str(dec.get("invalidation_point", "") or "").strip()
+    rw = str(dec.get("risk_warning", "") or "").strip()
+    entry_txt = f"{el:,.2f}-{eh:,.2f}" if isinstance(el, (int, float)) and isinstance(eh, (int, float)) else "n/a"
+    tp2_txt = f"{tp2:,.2f}" if isinstance(tp2, (int, float)) else "n/a"
+    line = (
+        f"🤖 Gemini (Master Prompt)\n"
+        f"Direction: {direction} ({action}) | Conviction: {conviction}/10 | Confidence: {conf}/100\n"
+        f"Entry Zone: {entry_txt}\n"
+        f"SL: {sl if isinstance(sl, (int, float)) else 'n/a'} | TP1: {tp if isinstance(tp, (int, float)) else 'n/a'} | TP2: {tp2_txt}"
+    )
+    if inv:
+        line += f"\nInvalidation: {inv}"
+    if rw:
+        line += f"\nRisk Warning: {rw}"
+    return line
+
+
 def main() -> int:
     _load_project_dotenv()
     # Default matches ecosystem.config.cjs eth-ta-telegram; set TA_PRESET=none to use only explicit TA_* from .env
@@ -1629,6 +1719,8 @@ def main() -> int:
             msg = snap.text
             if snap.banner:
                 msg = snap.banner + "\n\n" + msg
+            if _gemini_signal_digest_enabled():
+                msg = msg + "\n\n---\n" + _build_gemini_signal_block(symbol, snap)
             if trade_sim:
                 process_ta_trade_sim(symbol, snap, token)
             elif trade_live:

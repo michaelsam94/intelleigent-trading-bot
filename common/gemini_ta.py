@@ -9,6 +9,13 @@ import re
 from typing import Any
 
 
+def _to_float_or_none(v: Any) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _strip_json_from_response(text: str) -> str | None:
     text = text.strip()
     if "```" in text:
@@ -25,6 +32,44 @@ def _strip_json_from_response(text: str) -> str | None:
 
 
 def build_system_prompt(symbol: str, quote_close: float) -> str:
+    use_master = os.environ.get("TA_GEMINI_MASTER_PROMPT", "0").strip().lower() in ("1", "true", "yes", "on")
+    if use_master:
+        return f"""Role: You are a Senior Crypto Quantitative Analyst specializing in Order Flow and Multi-Timeframe Technical Analysis.
+Asset: {symbol}. Latest 5m reference close: {quote_close:,.6f}.
+
+Objective:
+- Perform confluence check across multi-timeframe TA + external market context.
+- Produce a high-probability directional setup with practical execution levels.
+
+Important:
+- If live external data cannot be reliably confirmed, be explicit in rationale and reduce conviction.
+- Always prioritize risk control and clear invalidation.
+
+You MUST respond with ONLY a single JSON object (no markdown, no extra text).
+Schema:
+{{
+  "action": "LONG" | "SHORT" | "HOLD",
+  "direction": "Long" | "Short" | "Neutral",
+  "conviction_score": <integer 1-10>,
+  "entry_low": <number or null>,
+  "entry_high": <number or null>,
+  "take_profit": <number or null>,
+  "stop_loss": <number or null>,
+  "tp1": <number or null>,
+  "tp2": <number or null>,
+  "risk_warning": "<string>",
+  "invalidation_point": "<string>",
+  "confidence": <integer 0-100>,
+  "rationale": "<short explanation>"
+}}
+
+Rules:
+- LONG => stop_loss < reference close and take_profit > reference close.
+- SHORT => take_profit < reference close and stop_loss > reference close.
+- HOLD => set price fields to null where applicable.
+- Keep numbers realistic and in quote units.
+- Ensure risk/reward is reasonable and avoid overconfident outputs in conflicting conditions."""
+
     return f"""You are an expert cryptocurrency technical analyst and risk manager.
 Symbol: {symbol} (spot). Latest reference close (5m): {quote_close:,.6f}.
 
@@ -57,6 +102,33 @@ def build_user_prompt(
 ) -> str:
     scores_line = ", ".join(f"{s:+.3f}" for s in tf_scores) if tf_scores else "n/a"
     labels_line = ", ".join(tf_labels) if tf_labels else "n/a"
+    use_master = os.environ.get("TA_GEMINI_MASTER_PROMPT", "0").strip().lower() in ("1", "true", "yes", "on")
+    if use_master:
+        return f"""[Master Technical Analysis Prompt Execution]
+
+Step 1: TA Breakdown
+- Trend alignment (5m, 15m, 1h, Daily): phase vs conflict
+- Overbought/oversold cross-check using RSI and WilliamsR context from digest
+- Volatility assessment using ATR for stop calibration
+
+Step 2: External data integration (attempt current context synthesis)
+- Order book depth / liquidity pockets
+- Liquidation clusters / heatmap-style liquidity zones
+- Sentiment and recent news context
+
+If external live context is uncertain or stale, state that clearly in rationale and lower conviction.
+
+Provided TA Digest:
+{ta_digest_text}
+
+Numeric summary:
+- Timeframe scores (5m,15m,30m,1h,1d,1w,1M): [{scores_line}]
+- Timeframe labels: {labels_line}
+- {aggregate_score_label}: {aggregate_score:+.4f}
+- Symbol: {symbol}
+
+Output strictly as JSON using the required schema."""
+
     return f"""=== Multi-timeframe technical analysis (computed) ===
 
 {ta_digest_text}
@@ -97,6 +169,14 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
         "stop_loss": sl_f,
         "confidence": int(data.get("confidence", 0) or 0),
         "rationale": str(data.get("rationale", "") or ""),
+        "direction": str(data.get("direction", "") or ""),
+        "conviction_score": int(data.get("conviction_score", 0) or 0),
+        "entry_low": _to_float_or_none(data.get("entry_low")),
+        "entry_high": _to_float_or_none(data.get("entry_high")),
+        "tp1": _to_float_or_none(data.get("tp1")),
+        "tp2": _to_float_or_none(data.get("tp2")),
+        "risk_warning": str(data.get("risk_warning", "") or ""),
+        "invalidation_point": str(data.get("invalidation_point", "") or ""),
     }
 
 
