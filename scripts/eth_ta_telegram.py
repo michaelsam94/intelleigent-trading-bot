@@ -268,6 +268,36 @@ def _sf_sub(name: str, default: str = "1") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _reverse_signals_enabled() -> bool:
+    """If enabled, invert entry direction (LONG <-> SHORT) for TA/Gemini/banner/open-every entries."""
+    return os.environ.get("TA_REVERSE_SIGNALS", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _opposite_side(side: str) -> str:
+    s = (side or "").strip().upper()
+    if s == "LONG":
+        return "SHORT"
+    if s == "SHORT":
+        return "LONG"
+    return s
+
+
+def _reverse_side_and_levels(side: str, entry_price: float, tp_price: float, sl_price: float) -> tuple[str, float, float]:
+    """
+    Flip LONG<->SHORT and mirror TP/SL around entry using original distances.
+    This preserves configured risk/reward distances while reversing direction.
+    """
+    s = (side or "").strip().upper()
+    if s not in ("LONG", "SHORT"):
+        return side, tp_price, sl_price
+    tp_dist = abs(float(tp_price) - float(entry_price))
+    sl_dist = abs(float(sl_price) - float(entry_price))
+    rs = _opposite_side(s)
+    if rs == "LONG":
+        return rs, float(entry_price) + tp_dist, float(entry_price) - sl_dist
+    return rs, float(entry_price) - tp_dist, float(entry_price) + sl_dist
+
+
 def _tf_label(score: float) -> str:
     if score >= 2.5:
         return "Strong Buy"
@@ -943,6 +973,8 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
             side = "SHORT"
     if not side:
         return None
+    if _reverse_signals_enabled():
+        side = _opposite_side(side)
     ok, _reason = _entry_filters_pass(snap, side, df)
     if not ok:
         return None
@@ -1457,6 +1489,13 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
 
     if not side:
         return
+
+    if _reverse_signals_enabled():
+        side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
+        if open_extra:
+            open_extra = f"{open_extra} | reversed signals"
+        else:
+            open_extra = "reversed signals"
 
     ok, skip_reason = _entry_filters_pass(snap, side, df)
     if not ok:
