@@ -377,6 +377,54 @@ def _reverse_side_and_levels(side: str, entry_price: float, tp_price: float, sl_
     return rs, float(entry_price) - tp_dist, float(entry_price) + sl_dist
 
 
+def _parse_gemini_entry_zone(dec: dict[str, Any]) -> tuple[float, float] | None:
+    """(entry_low, entry_high) when both are valid positive floats."""
+    try:
+        el = dec.get("entry_low")
+        eh = dec.get("entry_high")
+        if el is None or eh is None:
+            return None
+        fl = float(el)
+        fh = float(eh)
+    except (TypeError, ValueError):
+        return None
+    if fl <= 0 or fh <= 0 or fl != fl or fh != fh:
+        return None
+    if fl > fh:
+        fl, fh = fh, fl
+    return (fl, fh)
+
+
+def _reference_price_in_entry_zone(side: str, close: float, el: float, eh: float) -> float:
+    """Anchor limit math to Gemini zone: do not use raw close when it is outside the band."""
+    s = (side or "").strip().upper()
+    if s == "SHORT":
+        if close < el:
+            return el
+        if close > eh:
+            return eh
+        return close
+    if s == "LONG":
+        if close > eh:
+            return eh
+        if close < el:
+            return el
+        return close
+    return close
+
+
+def _clamp_limit_price_to_zone(px: float, el: float, eh: float, tick: float, side: str) -> float:
+    """Keep exchange limit inside [el, eh] after rounding to tick."""
+    px = min(max(px, el), eh)
+    up = side == "SHORT"
+    r = _round_to_step(px, tick, up=up)
+    if r < el:
+        r = _round_to_step(el, tick, up=True)
+    if r > eh:
+        r = _round_to_step(eh, tick, up=False)
+    return min(max(r, el), eh)
+
+
 def _tf_label(score: float) -> str:
     if score >= 2.5:
         return "Strong Buy"
@@ -1012,10 +1060,11 @@ def _decide_ta_entry(
     *,
     gemini_dec: dict[str, Any] | None = None,
     gemini_shared_ran: bool = False,
-) -> tuple[str, float, float, float, float] | None:
+) -> tuple[str, float, float, float, float, tuple[float, float] | None] | None:
     """
     Decide entry from current TA logic.
-    Returns (side, close_price, tp_price, sl_price, lev) or None.
+    Returns (side, close_price, tp_price, sl_price, lev, gemini_entry_zone) or None.
+    gemini_entry_zone is (entry_low, entry_high) when live Gemini supplied both and zone placement is enabled; else None.
     If gemini_dec is provided (shared per-cycle call), live Gemini path uses it instead of a new API request.
     If gemini_shared_ran is True and gemini_dec is None, do not call Gemini again (quota already spent).
     """
@@ -1029,6 +1078,7 @@ def _decide_ta_entry(
     side = ""
     tp_price = 0.0
     sl_price = 0.0
+    live_gemini_zone: tuple[float, float] | None = None
     open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
@@ -1101,6 +1151,14 @@ def _decide_ta_entry(
                 if tp_v is not None and sl_v is not None:
                     side = action
                     tp_price, sl_price = tp_v, sl_v
+                    if _sf_sub("TA_GEMINI_USE_ENTRY_ZONE", "1"):
+                        z = _parse_gemini_entry_zone(dec)
+                        if z:
+                            live_gemini_zone = z
+                            print(
+                                f"LIVE Gemini entry zone: {z[0]:,.2f}–{z[1]:,.2f} (limit will respect band)",
+                                flush=True,
+                            )
                     print(
                         f"LIVE Gemini used: action={action} tp={tp_price:.2f} sl={sl_price:.2f}",
                         flush=True,
@@ -1124,6 +1182,7 @@ def _decide_ta_entry(
         return None
     reverse_on = _reverse_signals_enabled()
     if reverse_on:
+        live_gemini_zone = None
         if tp_price > 0 and sl_price > 0:
             side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
         else:
@@ -1133,7 +1192,7 @@ def _decide_ta_entry(
         return None
     if tp_price <= 0 or sl_price <= 0:
         tp_price, sl_price, _ = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig)
-    return side, close_price, tp_price, sl_price, lev
+    return side, close_price, tp_price, sl_price, lev, live_gemini_zone
 
 
 def process_ta_trade_live_futures(
@@ -1162,21 +1221,28 @@ def process_ta_trade_live_futures(
     if dec is None:
         print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
         return
-    side, close_price, tp_price, sl_price, lev = dec
+    side, close_price, tp_price, sl_price, lev, gemini_zone = dec
     _futures_setup(client, fut_symbol, int(lev), isolated=True)
     tick, step, min_qty, min_notional = _futures_symbol_filters(client, fut_symbol)
     order_book = client.futures_order_book(symbol=fut_symbol, limit=5)
     bid = float(order_book["bids"][0][0])
     ask = float(order_book["asks"][0][0])
     maker_bps = float(os.environ.get("TA_REAL_ENTRY_MAKER_OFFSET_BPS", "1.0"))
+    ref_price = close_price
+    if gemini_zone is not None:
+        el, eh = gemini_zone
+        ref_price = _reference_price_in_entry_zone(side, close_price, el, eh)
     if side == "LONG":
-        raw_px = min(close_price, bid) * (1.0 - maker_bps / 10000.0)
+        raw_px = min(ref_price, bid) * (1.0 - maker_bps / 10000.0)
         px = _round_to_step(raw_px, tick, up=False)
         entry_side = "BUY"
     else:
-        raw_px = max(close_price, ask) * (1.0 + maker_bps / 10000.0)
+        raw_px = max(ref_price, ask) * (1.0 + maker_bps / 10000.0)
         px = _round_to_step(raw_px, tick, up=True)
         entry_side = "SELL"
+    if gemini_zone is not None:
+        el, eh = gemini_zone
+        px = _clamp_limit_price_to_zone(px, el, eh, tick, side)
     fixed_qty = float(os.environ.get("TA_REAL_FIXED_QTY", "0") or 0.0)
     min_notional_qty = (min_notional / max(px, 1e-12)) if min_notional > 0 else 0.0
     target_qty = fixed_qty if fixed_qty > 0 else max(min_qty, min_notional_qty)
@@ -1276,8 +1342,13 @@ def process_ta_trade_live_futures(
         timeInForce="GTC",
         newClientOrderId=entry_id,
     )
+    zone_line = ""
+    if gemini_zone is not None:
+        zl, zh = gemini_zone
+        zone_line = f"Gemini zone: {zl:,.2f}–{zh:,.2f} | ref {close_price:,.2f} → limit anchor {ref_price:,.2f}\n"
     _tx(
         f"📡 LIVE {side} LIMIT submitted\n"
+        f"{zone_line}"
         f"Symbol: {fut_symbol} | Qty: {qty} | Limit: {px:,.2f} | Notional: {order_notional:.2f}\n"
         f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x"
     )
