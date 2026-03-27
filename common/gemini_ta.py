@@ -45,7 +45,12 @@ def _retry_delay_seconds_from_error(err: BaseException) -> float | None:
 
 def _is_rate_limit_error(err: BaseException) -> bool:
     s = str(err).lower()
-    return "429" in s or "resource_exhausted" in s or "quota" in s and "exceed" in s
+    return "429" in s or "resource_exhausted" in s or ("quota" in s and "exceed" in s)
+
+
+def _quota_limit_zero(err: BaseException) -> bool:
+    """True when Google reports free-tier quota exhausted (limit: 0) for the model."""
+    return bool(re.search(r"limit:\s*0\b", str(err)))
 
 
 def _to_float_or_none(v: Any) -> float | None:
@@ -385,7 +390,11 @@ def gemini_trade_decision(
     if not api_key:
         return None
     timeout_s = float(os.environ.get("TA_GEMINI_TIMEOUT_SEC", "45") or 45.0)
-    model_name = (os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+    primary = (os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+    fallback_m = (os.environ.get("GEMINI_MODEL_FALLBACK") or "").strip()
+    model_names = [primary]
+    if fallback_m and fallback_m != primary:
+        model_names.append(fallback_m)
     max_429_retries = int(float(os.environ.get("TA_GEMINI_429_RETRIES", "3") or 3))
     max_out = int(float(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "2048") or 2048))
 
@@ -397,7 +406,7 @@ def gemini_trade_decision(
             except FuturesTimeoutError as e:
                 raise RuntimeError(f"Gemini request timed out after {timeout_s:.1f}s") from e
 
-    def _call_new_sdk_once() -> str:
+    def _call_new_sdk_once(mn: str) -> str:
         from google import genai as genai_new  # type: ignore
 
         client = genai_new.Client(api_key=api_key)
@@ -411,7 +420,7 @@ def gemini_trade_decision(
             cfg = {**base, **extra}
             try:
                 resp = client.models.generate_content(
-                    model=model_name,
+                    model=mn,
                     contents=full_user_prompt,
                     config=cfg,
                 )
@@ -420,12 +429,14 @@ def gemini_trade_decision(
                     return t
             except Exception as e:
                 if extra:
+                    if _is_rate_limit_error(e):
+                        raise
                     print(f"Gemini new SDK (JSON mode): {e!s} — retrying without response_mime_type", flush=True)
                     continue
                 raise
         return ""
 
-    def _call_old_sdk_once() -> str:
+    def _call_old_sdk_once(mn: str) -> str:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", FutureWarning)
@@ -435,7 +446,7 @@ def gemini_trade_decision(
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(
-            model_name,
+            mn,
             system_instruction=system_instruction or "You output only valid JSON.",
         )
         gen_cfg: dict[str, Any] = {
@@ -445,7 +456,9 @@ def gemini_trade_decision(
         }
         try:
             resp = model.generate_content(full_user_prompt, generation_config=gen_cfg)
-        except Exception:
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                raise
             gen_cfg.pop("response_mime_type", None)
             resp = model.generate_content(full_user_prompt, generation_config=gen_cfg)
         return _extract_text_from_genai_response(resp)
@@ -467,48 +480,70 @@ def gemini_trade_decision(
         print(f"Gemini rate limit — sleeping {wait_s:.0f}s before retry", flush=True)
         time.sleep(wait_s)
 
-    for attempt in range(max_429_retries + 1):
-        text_new = ""
-        try:
-            text_new = _run_with_timeout(_call_new_sdk_once)
-        except Exception as e:
-            if _is_rate_limit_error(e) and attempt < max_429_retries:
-                _sleep_for_429(e)
-                continue
-            print(f"Gemini new SDK error: {e} — trying legacy SDK", flush=True)
+    for model_name in model_names:
+        if model_name != primary:
+            print(f"Gemini: trying GEMINI_MODEL_FALLBACK={model_name}", flush=True)
 
-        if text_new:
-            parsed = parse_gemini_trade_json(text_new)
-            if parsed is not None:
-                return parsed
-            snip = text_new[:500].replace("\n", " ")
-            print(f"Gemini: new SDK text did not parse as JSON; sample={snip!r}", flush=True)
-            if _skip_legacy_after_json_fragment(text_new):
-                print(
-                    "Gemini: skipping legacy SDK (JSON fragment from new SDK; "
-                    "raise GEMINI_MAX_OUTPUT_TOKENS or fix model)",
-                    flush=True,
-                )
-                return None
-            print("Gemini: trying legacy SDK", flush=True)
+        for attempt in range(max_429_retries + 1):
+            text_new = ""
+            try:
+                text_new = _run_with_timeout(lambda mn=model_name: _call_new_sdk_once(mn))
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    if _quota_limit_zero(e):
+                        print(
+                            f"Gemini: free-tier quota exhausted for {model_name} (limit: 0). "
+                            "Set GEMINI_MODEL_FALLBACK (e.g. gemini-2.0-flash) or enable billing.",
+                            flush=True,
+                        )
+                        break
+                    if attempt < max_429_retries:
+                        _sleep_for_429(e)
+                        continue
+                print(f"Gemini new SDK error: {e} — trying legacy SDK", flush=True)
 
-        try:
-            text_old = _run_with_timeout(_call_old_sdk_once)
-        except Exception as e:
-            if _is_rate_limit_error(e) and attempt < max_429_retries:
-                _sleep_for_429(e)
-                continue
-            raise RuntimeError(f"Gemini API error: {e}") from e
+            if text_new:
+                parsed = parse_gemini_trade_json(text_new)
+                if parsed is not None:
+                    return parsed
+                snip = text_new[:500].replace("\n", " ")
+                print(f"Gemini: new SDK text did not parse as JSON; sample={snip!r}", flush=True)
+                if _skip_legacy_after_json_fragment(text_new):
+                    print(
+                        "Gemini: skipping legacy SDK (JSON fragment from new SDK; "
+                        "raise GEMINI_MAX_OUTPUT_TOKENS or fix model)",
+                        flush=True,
+                    )
+                    return None
+                print("Gemini: trying legacy SDK", flush=True)
 
-        if text_old:
-            parsed = parse_gemini_trade_json(text_old)
-            if parsed is not None:
-                return parsed
-            snip = text_old[:500].replace("\n", " ")
-            print(f"Gemini: legacy SDK text did not parse; sample={snip!r}", flush=True)
+            try:
+                text_old = _run_with_timeout(lambda mn=model_name: _call_old_sdk_once(mn))
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    if _quota_limit_zero(e):
+                        print(
+                            f"Gemini: free-tier quota exhausted for {model_name} (limit: 0). "
+                            "Set GEMINI_MODEL_FALLBACK (e.g. gemini-2.0-flash) or enable billing.",
+                            flush=True,
+                        )
+                        break
+                    if attempt < max_429_retries:
+                        _sleep_for_429(e)
+                        continue
+                raise RuntimeError(f"Gemini API error: {e}") from e
 
-        print("Gemini: empty or unparseable response from both SDKs", flush=True)
-        return None
+            if text_old:
+                parsed = parse_gemini_trade_json(text_old)
+                if parsed is not None:
+                    return parsed
+                snip = text_old[:500].replace("\n", " ")
+                print(f"Gemini: legacy SDK text did not parse; sample={snip!r}", flush=True)
+
+            print("Gemini: empty or unparseable response from both SDKs", flush=True)
+            break
+
+    return None
 
 
 def run_gemini_decision(

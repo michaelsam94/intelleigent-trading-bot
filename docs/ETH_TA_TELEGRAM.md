@@ -236,6 +236,7 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_SINGLE_CALL_PER_CYCLE` | `1` | `1` = one Gemini call per loop shared by digest + trading paths |
 | `GEMINI_API_KEY` | — | Required if Gemini enabled |
 | `GEMINI_MODEL` | `gemini-2.0-flash` | Optional model name (code default if unset) |
+| `GEMINI_MODEL_FALLBACK` | — | Optional second model (e.g. `gemini-2.0-flash`) used after **`GEMINI_MODEL`** hits free-tier **`limit: 0`**, or when both SDKs return empty/unparseable text |
 
 ## ML trading vs TA-sim
 
