@@ -958,6 +958,8 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
     atr_sig = _atr_from_df(df)
     use_gemini_live = _gemini_live_entries_enabled() and not open_every
+    if _gemini_live_entries_enabled() and open_every:
+        print("LIVE Gemini bypassed: TA_OPEN_EVERY_DIGEST=1", flush=True)
     if open_every:
         sc5 = snap.score_5m
         lab5 = (snap.label_5m or "").strip()
@@ -1007,10 +1009,22 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
                 side = action
                 if tp_v is not None and sl_v is not None:
                     tp_price, sl_price = tp_v, sl_v
+                    print(
+                        f"LIVE Gemini used: action={action} tp={tp_price:.2f} sl={sl_price:.2f}",
+                        flush=True,
+                    )
                 else:
                     tp_price, sl_price, _ = _fixed_tp_sl_levels(
                         side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
                     )
+                    print(
+                        f"LIVE Gemini used action={action}, but TP/SL invalid; using TA fallback TP/SL",
+                        flush=True,
+                    )
+            else:
+                print(f"LIVE Gemini returned action={action}; no live entry from Gemini this cycle", flush=True)
+        else:
+            print("LIVE Gemini returned no decision; falling back to TA score entry", flush=True)
     if not side:
         return None
     reverse_on = _reverse_signals_enabled()
@@ -1596,8 +1610,10 @@ def _build_gemini_signal_block(symbol: str, snap: TASnapshot) -> str:
             aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
         )
     except Exception as e:
+        print(f"Gemini digest signal unavailable: {e}", flush=True)
         return f"🤖 Gemini signal: unavailable ({e})"
     if not dec:
+        print("Gemini digest signal unavailable: empty response", flush=True)
         return "🤖 Gemini signal: unavailable (empty response)"
     action = str(dec.get("action", "HOLD")).upper()
     direction = str(dec.get("direction", "") or "").strip() or ("Neutral" if action == "HOLD" else action.title())
@@ -1622,6 +1638,10 @@ def _build_gemini_signal_block(symbol: str, snap: TASnapshot) -> str:
         line += f"\nInvalidation: {inv}"
     if rw:
         line += f"\nRisk Warning: {rw}"
+    print(
+        f"Gemini digest signal built: action={action} conviction={conviction}/10 confidence={conf}/100",
+        flush=True,
+    )
     return line
 
 
@@ -1670,7 +1690,10 @@ def main() -> int:
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim} "
         f"trade_live={trade_live} "
         f"TA_PRESET={preset_line or '(none)'} "
-        f"gemini_entries={_gemini_entries_env_enabled()} (off when TA_OPEN_EVERY_DIGEST=1)",
+        f"gemini_entries={_gemini_entries_env_enabled()} "
+        f"gemini_for_live={_gemini_live_entries_enabled()} "
+        f"gemini_signal_every_digest={_gemini_signal_digest_enabled()} "
+        f"(entry Gemini is bypassed when TA_OPEN_EVERY_DIGEST=1)",
         flush=True,
     )
     print(
