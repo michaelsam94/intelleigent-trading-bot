@@ -1109,7 +1109,13 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
             client.futures_cancel_order(symbol=fut_symbol, orderId=oid)
         except Exception:
             pass
-        _tx("⚠️ LIVE entry not filled in time; canceled.")
+        # Pre-place may have added TP/SL; clear all open orders for this symbol (conditional + limit).
+        if _sf_sub("TA_REAL_CANCEL_ALL_ON_ENTRY_TIMEOUT", "1"):
+            try:
+                client.futures_cancel_all_open_orders(symbol=fut_symbol)
+            except Exception as e:
+                print(f"LIVE: cancel_all_open_orders after entry timeout failed: {e}", flush=True)
+        _tx("⚠️ LIVE entry not filled in time; entry canceled and open orders cleared for symbol.")
         return
 
     # Fallback: place exits now only if not already pre-placed.
