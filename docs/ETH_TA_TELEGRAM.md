@@ -126,6 +126,7 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_GEMINI_ENABLED`** | *(unset)* | Same as **`TA_USE_GEMINI`** if **`TA_USE_GEMINI`** is not set (alias). If **both** are set, **`TA_USE_GEMINI`** wins. |
 | **`TA_GEMINI_FOR_LIVE`** | **`0`** | Set to **`1`** to allow Gemini direction/TP/SL for **live futures** entries (still one-position-only, falls back to TA rules on failure). |
 | **`TA_GEMINI_OVERRIDE_OPEN_EVERY`** | **`0`** | Set to **`1`** to let live Gemini entry logic run even when `TA_OPEN_EVERY_DIGEST=1` (otherwise open-every mode bypasses Gemini for entry). |
+| **`TA_GEMINI_LIVE_NO_TA_FALLBACK`** | **`1`** | **`1`** = when **`TA_GEMINI_FOR_LIVE=1`**, live entries use **only** Gemini (no direction from open-every or TA score if Gemini fails). Set **`0`** to allow TA-first behavior again. |
 | **`TA_GEMINI_MASTER_PROMPT`** | **`0`** | Set to **`1`** to use the Master TA prompt format (direction, conviction, entry zone, TP/SL, invalidation fields). |
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
 | **`TA_GEMINI_TIMEOUT_SEC`** | **`45`** | Gemini request timeout in seconds (per SDK attempt). |
@@ -224,6 +225,7 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_ENABLED` | — | Alias for **`TA_USE_GEMINI`** when **`TA_USE_GEMINI`** is unset |
 | `TA_GEMINI_FOR_LIVE` | `0` | `1` = live futures path can use Gemini action + TP/SL (fallback to TA logic if Gemini fails/returns HOLD) |
 | `TA_GEMINI_OVERRIDE_OPEN_EVERY` | `0` | `1` = do not bypass live Gemini entries when `TA_OPEN_EVERY_DIGEST=1` |
+| `TA_GEMINI_LIVE_NO_TA_FALLBACK` | `1` | `1` = live trades require Gemini (no TA fallback when Gemini fails) |
 | `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = use Master TA prompt JSON schema (direction/conviction/entry zone/invalidation + action/TP/SL) |
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
 | `TA_GEMINI_TIMEOUT_SEC` | `45` | Gemini API timeout in seconds (per attempt) |

@@ -270,6 +270,11 @@ def _gemini_override_open_every_enabled() -> bool:
     return _sf_sub("TA_GEMINI_OVERRIDE_OPEN_EVERY", "0")
 
 
+def _gemini_live_no_ta_fallback_enabled() -> bool:
+    """When live Gemini is enabled, do not set entry direction from TA/open-every first (Gemini-only)."""
+    return _sf_sub("TA_GEMINI_LIVE_NO_TA_FALLBACK", "1")
+
+
 def _gemini_signal_digest_enabled() -> bool:
     """Whether to append a Gemini signal section to every 5m digest."""
     return _gemini_entries_env_enabled() and _sf_sub("TA_GEMINI_SIGNAL_EVERY_DIGEST", "0")
@@ -1030,36 +1035,40 @@ def _decide_ta_entry(
     atr_sig = _atr_from_df(df)
     gemini_override_open_every = _gemini_override_open_every_enabled()
     use_gemini_live = _gemini_live_entries_enabled() and (not open_every or gemini_override_open_every)
+    skip_ta_for_live_side = use_gemini_live and _gemini_live_no_ta_fallback_enabled()
     if _gemini_live_entries_enabled() and open_every and not gemini_override_open_every:
         print("LIVE Gemini bypassed: TA_OPEN_EVERY_DIGEST=1", flush=True)
     if _gemini_live_entries_enabled() and open_every and gemini_override_open_every:
         print("LIVE Gemini override active: using Gemini despite TA_OPEN_EVERY_DIGEST=1", flush=True)
-    if open_every and not gemini_override_open_every:
-        sc5 = snap.score_5m
-        lab5 = (snap.label_5m or "").strip()
-        strong_5m_only = _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0")
-        if strong_5m_only:
-            if lab5 == "Strong Buy":
-                side = "LONG"
-            elif lab5 == "Strong Sell":
-                side = "SHORT"
-        else:
-            min_abs = float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0") or 0.0)
-            if min_abs > 0:
-                if sc5 >= min_abs:
+    if skip_ta_for_live_side:
+        print("LIVE entry: Gemini-only (TA_OPEN_EVERY / score thresholds not used for direction)", flush=True)
+    if not skip_ta_for_live_side:
+        if open_every and not gemini_override_open_every:
+            sc5 = snap.score_5m
+            lab5 = (snap.label_5m or "").strip()
+            strong_5m_only = _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0")
+            if strong_5m_only:
+                if lab5 == "Strong Buy":
                     side = "LONG"
-                elif sc5 <= -min_abs:
+                elif lab5 == "Strong Sell":
                     side = "SHORT"
             else:
-                side = "LONG" if sc5 >= 0 else "SHORT"
-    else:
-        ms = snap.score_for_entry
-        want_long = ms >= long_min
-        want_short = ms <= short_max
-        if want_long and not want_short:
-            side = "LONG"
-        elif want_short and not want_long:
-            side = "SHORT"
+                min_abs = float(os.environ.get("TA_OPEN_EVERY_MIN_ABS_SCORE", "0") or 0.0)
+                if min_abs > 0:
+                    if sc5 >= min_abs:
+                        side = "LONG"
+                    elif sc5 <= -min_abs:
+                        side = "SHORT"
+                else:
+                    side = "LONG" if sc5 >= 0 else "SHORT"
+        else:
+            ms = snap.score_for_entry
+            want_long = ms >= long_min
+            want_short = ms <= short_max
+            if want_long and not want_short:
+                side = "LONG"
+            elif want_short and not want_long:
+                side = "SHORT"
     if not side and use_gemini_live:
         dec = gemini_dec
         if dec is None and not gemini_shared_ran:
@@ -1074,7 +1083,10 @@ def _decide_ta_entry(
                     aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
                 )
             except Exception as e:
-                print(f"LIVE Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+                if skip_ta_for_live_side:
+                    print(f"LIVE Gemini decision failed: {e} — no entry (Gemini-only)", flush=True)
+                else:
+                    print(f"LIVE Gemini decision failed: {e} — falling back to TA score entry", flush=True)
         elif dec is None and gemini_shared_ran:
             print(
                 "LIVE Gemini: shared call had no usable decision — skipping duplicate API (quota)",
@@ -1101,7 +1113,13 @@ def _decide_ta_entry(
             else:
                 print(f"LIVE Gemini returned action={action}; no live entry from Gemini this cycle", flush=True)
         else:
-            print("LIVE Gemini returned no decision; falling back to TA score entry", flush=True)
+            if skip_ta_for_live_side:
+                print(
+                    "LIVE Gemini returned no usable decision — no entry (TA_GEMINI_LIVE_NO_TA_FALLBACK=1).",
+                    flush=True,
+                )
+            else:
+                print("LIVE Gemini returned no usable decision.", flush=True)
     if not side:
         return None
     reverse_on = _reverse_signals_enabled()
@@ -1802,6 +1820,7 @@ def main() -> int:
         f"gemini_entries={_gemini_entries_env_enabled()} "
         f"gemini_for_live={_gemini_live_entries_enabled()} "
         f"gemini_override_open_every={_gemini_override_open_every_enabled()} "
+        f"gemini_live_no_ta_fallback={_gemini_live_no_ta_fallback_enabled()} "
         f"gemini_signal_every_digest={_gemini_signal_digest_enabled()} "
         f"gemini_pause_until_flat={_gemini_pause_until_flat_enabled()} "
         f"gemini_single_call={_gemini_single_call_per_cycle_enabled()} "
