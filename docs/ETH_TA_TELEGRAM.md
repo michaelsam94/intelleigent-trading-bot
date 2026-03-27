@@ -125,8 +125,10 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_USE_GEMINI`** | **`0`** (off) | Set to **`1`** to call Gemini for paper-trade entries when flat (before TA score fallback). |
 | **`TA_GEMINI_ENABLED`** | *(unset)* | Same as **`TA_USE_GEMINI`** if **`TA_USE_GEMINI`** is not set (alias). If **both** are set, **`TA_USE_GEMINI`** wins. |
 | **`TA_GEMINI_FOR_LIVE`** | **`0`** | Set to **`1`** to allow Gemini direction/TP/SL for **live futures** entries (still one-position-only, falls back to TA rules on failure). |
+| **`TA_GEMINI_OVERRIDE_OPEN_EVERY`** | **`0`** | Set to **`1`** to let live Gemini entry logic run even when `TA_OPEN_EVERY_DIGEST=1` (otherwise open-every mode bypasses Gemini for entry). |
 | **`TA_GEMINI_MASTER_PROMPT`** | **`0`** | Set to **`1`** to use the Master TA prompt format (direction, conviction, entry zone, TP/SL, invalidation fields). |
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
+| **`TA_GEMINI_TIMEOUT_SEC`** | **`20`** | Gemini request timeout in seconds; helps avoid long blocking calls during a digest cycle. |
 
 Gemini is **not** used when **`TA_OPEN_EVERY_DIGEST=1`** (open-every mode always wins).
 
@@ -216,8 +218,10 @@ pm2 logs eth-ta-telegram
 | `TA_USE_GEMINI` | `0` | `1` = Gemini for entries when flat; `0` = TA score only (see **`TA_GEMINI_ENABLED`** alias above) |
 | `TA_GEMINI_ENABLED` | — | Alias for **`TA_USE_GEMINI`** when **`TA_USE_GEMINI`** is unset |
 | `TA_GEMINI_FOR_LIVE` | `0` | `1` = live futures path can use Gemini action + TP/SL (fallback to TA logic if Gemini fails/returns HOLD) |
+| `TA_GEMINI_OVERRIDE_OPEN_EVERY` | `0` | `1` = do not bypass live Gemini entries when `TA_OPEN_EVERY_DIGEST=1` |
 | `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = use Master TA prompt JSON schema (direction/conviction/entry zone/invalidation + action/TP/SL) |
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
+| `TA_GEMINI_TIMEOUT_SEC` | `20` | Gemini API timeout in seconds (applies to both new and legacy SDK client paths) |
 | `GEMINI_API_KEY` | — | Required if Gemini enabled |
 | `GEMINI_MODEL` | `gemini-1.5-flash` | Optional model name |
 

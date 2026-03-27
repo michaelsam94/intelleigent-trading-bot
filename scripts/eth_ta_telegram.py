@@ -264,6 +264,11 @@ def _gemini_live_entries_enabled() -> bool:
     return _gemini_entries_env_enabled() and _sf_sub("TA_GEMINI_FOR_LIVE", "0")
 
 
+def _gemini_override_open_every_enabled() -> bool:
+    """Allow live Gemini entry even when TA_OPEN_EVERY_DIGEST=1."""
+    return _sf_sub("TA_GEMINI_OVERRIDE_OPEN_EVERY", "0")
+
+
 def _gemini_signal_digest_enabled() -> bool:
     """Whether to append a Gemini signal section to every 5m digest."""
     return _gemini_entries_env_enabled() and _sf_sub("TA_GEMINI_SIGNAL_EVERY_DIGEST", "0")
@@ -957,10 +962,13 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
     atr_sig = _atr_from_df(df)
-    use_gemini_live = _gemini_live_entries_enabled() and not open_every
-    if _gemini_live_entries_enabled() and open_every:
+    gemini_override_open_every = _gemini_override_open_every_enabled()
+    use_gemini_live = _gemini_live_entries_enabled() and (not open_every or gemini_override_open_every)
+    if _gemini_live_entries_enabled() and open_every and not gemini_override_open_every:
         print("LIVE Gemini bypassed: TA_OPEN_EVERY_DIGEST=1", flush=True)
-    if open_every:
+    if _gemini_live_entries_enabled() and open_every and gemini_override_open_every:
+        print("LIVE Gemini override active: using Gemini despite TA_OPEN_EVERY_DIGEST=1", flush=True)
+    if open_every and not gemini_override_open_every:
         sc5 = snap.score_5m
         lab5 = (snap.label_5m or "").strip()
         strong_5m_only = _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0")
@@ -1692,6 +1700,7 @@ def main() -> int:
         f"TA_PRESET={preset_line or '(none)'} "
         f"gemini_entries={_gemini_entries_env_enabled()} "
         f"gemini_for_live={_gemini_live_entries_enabled()} "
+        f"gemini_override_open_every={_gemini_override_open_every_enabled()} "
         f"gemini_signal_every_digest={_gemini_signal_digest_enabled()} "
         f"(entry Gemini is bypassed when TA_OPEN_EVERY_DIGEST=1)",
         flush=True,
