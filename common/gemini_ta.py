@@ -60,6 +60,24 @@ def _to_float_or_none(v: Any) -> float | None:
         return None
 
 
+def _gemini_master_prompt_enabled() -> bool:
+    return os.environ.get("TA_GEMINI_MASTER_PROMPT", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_gemini_take_profit(tp_raw: Any, tp1_raw: Any) -> float | None:
+    """
+    Master prompt often sets both take_profit and tp1; TP1 is the first target and should drive execution.
+    Non-master JSON typically only has take_profit.
+    """
+    tp0 = _to_float_or_none(tp_raw)
+    tp1 = _to_float_or_none(tp1_raw)
+    if _gemini_master_prompt_enabled() and tp1 is not None:
+        return tp1
+    if tp0 is not None:
+        return tp0
+    return tp1
+
+
 def _extract_first_json_object(text: str) -> str | None:
     """First balanced `{ ... }` block (handles nested objects; avoids greedy-regex bugs)."""
     start = text.find("{")
@@ -257,17 +275,12 @@ def _trade_dict_from_flat(data: dict[str, Any]) -> dict[str, Any]:
             action = ddir.upper()
     tp = data.get("take_profit")
     sl = data.get("stop_loss")
-    try:
-        tp_f = float(tp) if tp is not None else None
-    except (TypeError, ValueError):
-        tp_f = None
+    tp_f = _resolve_gemini_take_profit(tp, data.get("tp1"))
     try:
         sl_f = float(sl) if sl is not None else None
     except (TypeError, ValueError):
         sl_f = None
     tp1 = _to_float_or_none(data.get("tp1"))
-    if tp_f is None and tp1 is not None:
-        tp_f = tp1
     return {
         "action": action,
         "take_profit": tp_f,
@@ -330,9 +343,12 @@ def _parse_trade_dict_from_regex(raw: str) -> dict[str, Any] | None:
             if d in ("long", "short"):
                 action = d.upper()
 
-    tp_f = _num_key("take_profit")
-    if tp_f is None:
-        tp_f = _num_key("tp1")
+    tp_take = _num_key("take_profit")
+    tp1v = _num_key("tp1")
+    if _gemini_master_prompt_enabled() and tp1v is not None:
+        tp_f = tp1v
+    else:
+        tp_f = tp_take if tp_take is not None else tp1v
     sl_f = _num_key("stop_loss")
 
     if action not in ("LONG", "SHORT"):
@@ -578,12 +594,18 @@ def validate_tp_sl(
     """Return validated (tp, sl) or (None, None) if invalid."""
     if action == "HOLD" or tp is None or sl is None:
         return None, None
+    try:
+        e = float(entry)
+        tp_f = float(tp)
+        sl_f = float(sl)
+    except (TypeError, ValueError):
+        return None, None
     if action == "LONG":
-        if not (sl < entry < tp):
+        if not (sl_f < e < tp_f):
             return None, None
     elif action == "SHORT":
-        if not (tp < entry < sl):
+        if not (tp_f < e < sl_f):
             return None, None
     else:
         return None, None
-    return tp, sl
+    return tp_f, sl_f

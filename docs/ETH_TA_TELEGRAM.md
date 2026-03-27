@@ -132,7 +132,7 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_GEMINI_FOR_LIVE`** | **`0`** | Set to **`1`** to allow Gemini direction/TP/SL for **live futures** entries (still one-position-only, falls back to TA rules on failure). |
 | **`TA_GEMINI_OVERRIDE_OPEN_EVERY`** | **`0`** | Set to **`1`** to let live Gemini entry logic run even when `TA_OPEN_EVERY_DIGEST=1` (otherwise open-every mode bypasses Gemini for entry). |
 | **`TA_GEMINI_LIVE_NO_TA_FALLBACK`** | **`1`** | **`1`** = when **`TA_GEMINI_FOR_LIVE=1`**, live entries use **only** Gemini (no direction from open-every or TA score if Gemini fails). Set **`0`** to allow TA-first behavior again. |
-| **`TA_GEMINI_MASTER_PROMPT`** | **`0`** | Set to **`1`** to use the Master TA prompt format (direction, conviction, entry zone, TP/SL, invalidation fields). |
+| **`TA_GEMINI_MASTER_PROMPT`** | **`0`** | Set to **`1`** to use the Master TA prompt format (direction, conviction, entry zone, TP/SL, invalidation fields). When **`1`**, **`tp1`** (first target) overrides **`take_profit`** if both are present so live/digest match the model’s TP1. |
 | **`TA_GEMINI_USE_ENTRY_ZONE`** | **`1`** | When **`1`** and Gemini returns **`entry_low` / `entry_high`**, the live **limit** price is set **inside that band** (last close if price is already in the zone; otherwise a point along the band, see **`TA_GEMINI_ZONE_LIMIT_FRAC`**). |
 | **`TA_GEMINI_ZONE_LIMIT_FRAC`** | **`0.5`** | When price is **outside** the Gemini entry zone, target = **`entry_low + frac × (entry_high − entry_low)`** (`0` = low, `1` = high, **`0.5`** = midpoint). Ignored when close is already between low and high. |
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
@@ -235,7 +235,7 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_LIVE_NO_TA_FALLBACK` | `1` | `1` = live trades require Gemini (no TA fallback when Gemini fails) |
 | `TA_GEMINI_USE_ENTRY_ZONE` | `1` | `1` = live **limit** inside Gemini `entry_low`–`entry_high` when both set; `0` = use last close + book only |
 | `TA_GEMINI_ZONE_LIMIT_FRAC` | `0.5` | In-zone target along the band when close is outside the zone (`0`=low, `0.5`=mid, `1`=high) |
-| `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = use Master TA prompt JSON schema (direction/conviction/entry zone/invalidation + action/TP/SL) |
+| `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = Master prompt schema; **`tp1` wins over `take_profit`** when both set |
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
 | `TA_GEMINI_TIMEOUT_SEC` | `45` | Gemini API timeout in seconds (per attempt) |
 | `TA_GEMINI_429_RETRIES` | `3` | Retries after rate limit / 429 with server-suggested backoff |

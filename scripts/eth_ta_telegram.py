@@ -1907,7 +1907,7 @@ def _build_gemini_signal_block(
         f"🤖 Gemini (Master Prompt)\n"
         f"Direction: {direction} ({action}) | Conviction: {conviction}/10 | Confidence: {conf}/100\n"
         f"Entry Zone: {entry_txt}\n"
-        f"SL: {sl if isinstance(sl, (int, float)) else 'n/a'} | TP1: {tp if isinstance(tp, (int, float)) else 'n/a'} | TP2: {tp2_txt}"
+        f"SL: {sl if isinstance(sl, (int, float)) else 'n/a'} | TP: {tp if isinstance(tp, (int, float)) else 'n/a'} | TP2: {tp2_txt}"
     )
     if inv:
         line += f"\nInvalidation: {inv}"
