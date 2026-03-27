@@ -1043,6 +1043,24 @@ def _futures_position_amt(client: Client, symbol: str) -> float:
     return 0.0
 
 
+def _futures_has_open_entry_limit(client: Client, symbol: str) -> bool:
+    """True if a working non-reduce LIMIT exists (avoids stacking entries in no-wait mode)."""
+    try:
+        for o in client.futures_get_open_orders(symbol=symbol):
+            st = str(o.get("status", "")).upper()
+            if st not in ("NEW", "PARTIALLY_FILLED"):
+                continue
+            if str(o.get("type", "")).upper() != "LIMIT":
+                continue
+            ro = o.get("reduceOnly")
+            if ro is True or (isinstance(ro, str) and ro.lower() == "true"):
+                continue
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _futures_setup(client: Client, symbol: str, lev: int, isolated: bool = True) -> None:
     try:
         client.futures_change_position_mode(dualSidePosition="false")
@@ -1296,6 +1314,7 @@ def process_ta_trade_live_futures(
             entry_wait_sec = max(base_entry_wait, zone_floor)
     else:
         entry_wait_sec = base_entry_wait
+    wait_fill = _sf_sub("TA_REAL_ENTRY_WAIT_FOR_FILL", "1")
 
     def _place_exit_orders(qty_for_exit: float) -> bool:
         exit_side = "SELL" if side == "LONG" else "BUY"
@@ -1346,7 +1365,16 @@ def process_ta_trade_live_futures(
         )
         return True
 
-    if preplace:
+    if not wait_fill:
+        if _futures_has_open_entry_limit(client, fut_symbol):
+            print(
+                f"LIVE skip: working LIMIT entry already on {fut_symbol} "
+                f"(TA_REAL_ENTRY_WAIT_FOR_FILL=0 — cancel or fill before a new bracket).",
+                flush=True,
+            )
+            return
+
+    if wait_fill and preplace:
         try:
             _place_exit_orders(qty)
             preplace_ok = True
@@ -1362,12 +1390,38 @@ def process_ta_trade_live_futures(
         timeInForce="GTC",
         newClientOrderId=entry_id,
     )
+    oid = int(ord0.get("orderId"))
     zone_line = ""
     if gemini_zone is not None:
         zl, zh = gemini_zone
         zone_line = (
             f"Gemini zone: {zl:,.2f}–{zh:,.2f} | close {close_price:,.2f} → in-zone target {ref_price:,.2f}\n"
         )
+    if not wait_fill:
+        _tx(
+            f"📡 LIVE {side} LIMIT on book (no in-bot wait)\n"
+            f"{zone_line}"
+            f"OrderId: {oid} | Symbol: {fut_symbol} | Qty: {qty} | Limit: {px:,.2f} | Notional: {order_notional:.2f}\n"
+            f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x\n"
+            f"TA_REAL_ENTRY_WAIT_FOR_FILL=0 — bot returns; GTC entry left working."
+        )
+        if preplace:
+            try:
+                _place_exit_orders(qty)
+                _tx(
+                    f"✅ TP/SL attached ({exit_mode.upper()} conditional): "
+                    f"TP {tp_price:,.2f} | SL {sl_price:,.2f}"
+                )
+            except Exception as e:
+                _tx(
+                    f"⚠️ TP/SL attach failed: {e}\n"
+                    f"Entry order {oid} may still be open. "
+                    f"(Binance often requires a position before reduce-only TP/SL — add TP/SL after fill if needed.)"
+                )
+        else:
+            _tx("ℹ️ TA_REAL_PREPLACE_EXITS=0 — no TP/SL orders sent with entry.")
+        return
+
     _tx(
         f"📡 LIVE {side} LIMIT submitted\n"
         f"{zone_line}"
@@ -1376,7 +1430,6 @@ def process_ta_trade_live_futures(
         + (" (Gemini zone)\n" if gemini_zone is not None else "\n")
         + f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x"
     )
-    oid = int(ord0.get("orderId"))
     timeout_s = entry_wait_sec
     start = time.time()
     filled = False

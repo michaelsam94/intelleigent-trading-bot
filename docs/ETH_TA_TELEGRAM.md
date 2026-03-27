@@ -27,6 +27,7 @@ Digest-only mode (no trades) is the default when **`TA_TRADE_SIM`** is unset or 
 - Uses **one-way** mode, sets **isolated margin**, applies `TA_LEVERAGE`.
 - Entry uses a **LIMIT** order near top-of-book (maker-biased by `TA_REAL_ENTRY_MAKER_OFFSET_BPS`). With **Gemini entry zone**, the limit is priced **inside** `entry_low`–`entry_high` (close if already in the band, else a point along the band — default **mid** via `TA_GEMINI_ZONE_LIMIT_FRAC`); fills may take longer, so the wait defaults to **`max(TA_REAL_ENTRY_TIMEOUT_SEC, TA_REAL_ENTRY_TIMEOUT_ZONE_MIN_SEC)`** (see below).
 - Tries to pre-place TP/SL close-position orders (`TA_REAL_PREPLACE_EXITS=1`), then falls back to placing them immediately after entry fill.
+- **`TA_REAL_ENTRY_WAIT_FOR_FILL=0`**: submit the **GTC entry limit**, then attach **TP/SL** (if pre-place enabled) and **return without polling** — no cancel-after-timeout. Skips a new bracket while a **working non-reduce LIMIT** is already open on the symbol. **Note:** Binance may reject **reduce-only** TP/SL until the entry fills; the bot warns if attach fails.
 - Uses minimum exchange quantity for initial live test.
 
 Suggested initial env:
@@ -40,6 +41,8 @@ TA_REAL_PREPLACE_EXITS=1
 TA_REAL_ENTRY_TIMEOUT_SEC=20
 # With Gemini entry zone, fill wait defaults to max( above , TA_REAL_ENTRY_TIMEOUT_ZONE_MIN_SEC ) — default 180s in code.
 # Override: TA_REAL_ENTRY_TIMEOUT_ZONE_SEC=300  (fixed wait whenever zone is used)
+# Set to 0 to skip polling: place GTC entry + TP/SL (if pre-place on) and return immediately:
+# TA_REAL_ENTRY_WAIT_FOR_FILL=0
 TA_REVERSE_SIGNALS=0
 ```
 
