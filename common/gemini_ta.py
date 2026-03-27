@@ -235,19 +235,14 @@ Symbol: {symbol}
 Based on ALL of the above, output the JSON decision."""
 
 
-def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
-    s = _strip_json_from_response(raw)
-    if not s:
-        return None
-    data: Any = None
-    for candidate in (s, _json_loose_fixes(s)):
-        try:
-            data = json.loads(candidate)
-            break
-        except json.JSONDecodeError:
-            continue
-    if data is None or not isinstance(data, dict):
-        return None
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _trade_dict_from_flat(data: dict[str, Any]) -> dict[str, Any]:
     action = str(data.get("action", "HOLD")).upper().strip()
     if action not in ("LONG", "SHORT", "HOLD"):
         action = "HOLD"
@@ -255,8 +250,6 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
         ddir = str(data.get("direction", "") or "").strip().lower()
         if ddir in ("long", "short"):
             action = ddir.upper()
-        elif ddir in ("neutral", "hold", ""):
-            pass
     tp = data.get("take_profit")
     sl = data.get("stop_loss")
     try:
@@ -270,13 +263,6 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
     tp1 = _to_float_or_none(data.get("tp1"))
     if tp_f is None and tp1 is not None:
         tp_f = tp1
-
-    def _safe_int(v: Any, default: int = 0) -> int:
-        try:
-            return int(float(v))
-        except (TypeError, ValueError):
-            return default
-
     return {
         "action": action,
         "take_profit": tp_f,
@@ -294,6 +280,99 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
     }
 
 
+def _fix_confidence_regex(t: str) -> int:
+    m = re.search(r'"confidence"\s*:\s*(\d+)', t)
+    if m:
+        return _safe_int(m.group(1), 0)
+    return 0
+
+
+def _fix_conviction_regex(t: str) -> int:
+    m = re.search(r'"conviction_score"\s*:\s*(\d+)', t)
+    if m:
+        return _safe_int(m.group(1), 0)
+    return 0
+
+
+def _parse_trade_dict_from_regex(raw: str) -> dict[str, Any] | None:
+    """
+    When JSON is truncated mid-stream, extract key fields with regex so TP/SL can still validate.
+    """
+    t = raw.strip()
+    if not t or '"' not in t:
+        return None
+
+    def _num_key(name: str) -> float | None:
+        m = re.search(rf'"{re.escape(name)}"\s*:\s*null\b', t, re.I)
+        if m:
+            return None
+        m = re.search(rf'"{re.escape(name)}"\s*:\s*(-?\d+\.?\d*)', t)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    m_act = re.search(r'"action"\s*:\s*"([^"]+)"', t, re.I)
+    action = (m_act.group(1) if m_act else "").upper().strip()
+    if action not in ("LONG", "SHORT", "HOLD"):
+        action = "HOLD"
+    if action == "HOLD":
+        m_dir = re.search(r'"direction"\s*:\s*"([^"]+)"', t, re.I)
+        if m_dir:
+            d = m_dir.group(1).lower()
+            if d in ("long", "short"):
+                action = d.upper()
+
+    tp_f = _num_key("take_profit")
+    if tp_f is None:
+        tp_f = _num_key("tp1")
+    sl_f = _num_key("stop_loss")
+
+    if action not in ("LONG", "SHORT"):
+        return None
+    if tp_f is None or sl_f is None:
+        return None
+
+    return {
+        "action": action,
+        "take_profit": tp_f,
+        "stop_loss": sl_f,
+        "confidence": _fix_confidence_regex(t),
+        "rationale": "",
+        "direction": "",
+        "conviction_score": _fix_conviction_regex(t),
+        "entry_low": _num_key("entry_low"),
+        "entry_high": _num_key("entry_high"),
+        "tp1": _num_key("tp1"),
+        "tp2": _num_key("tp2"),
+        "risk_warning": "",
+        "invalidation_point": "",
+    }
+
+
+def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
+    s = _strip_json_from_response(raw)
+    data: Any = None
+    if s:
+        for candidate in (s, _json_loose_fixes(s)):
+            try:
+                data = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+    if isinstance(data, dict):
+        return _trade_dict_from_flat(data)
+    fb = _parse_trade_dict_from_regex(raw)
+    if fb is not None:
+        m_rat = re.search(r'"rationale"\s*:\s*"([^"]*)"', raw, re.S)
+        if m_rat:
+            fb["rationale"] = m_rat.group(1)[:2000]
+        return fb
+    return None
+
+
 def gemini_trade_decision(
     full_user_prompt: str,
     *,
@@ -308,6 +387,7 @@ def gemini_trade_decision(
     timeout_s = float(os.environ.get("TA_GEMINI_TIMEOUT_SEC", "45") or 45.0)
     model_name = (os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip() or "gemini-2.0-flash"
     max_429_retries = int(float(os.environ.get("TA_GEMINI_429_RETRIES", "3") or 3))
+    max_out = int(float(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "2048") or 2048))
 
     def _run_with_timeout(fn):
         with ThreadPoolExecutor(max_workers=1) as ex:
@@ -321,18 +401,29 @@ def gemini_trade_decision(
         from google import genai as genai_new  # type: ignore
 
         client = genai_new.Client(api_key=api_key)
-        cfg: dict[str, Any] = {
+        base: dict[str, Any] = {
             "temperature": 0.2,
-            "max_output_tokens": 1024,
+            "max_output_tokens": max_out,
         }
         if system_instruction:
-            cfg["system_instruction"] = system_instruction
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=full_user_prompt,
-            config=cfg,
-        )
-        return _extract_text_from_genai_response(resp)
+            base["system_instruction"] = system_instruction
+        for extra in ({"response_mime_type": "application/json"}, {}):
+            cfg = {**base, **extra}
+            try:
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=full_user_prompt,
+                    config=cfg,
+                )
+                t = _extract_text_from_genai_response(resp)
+                if t:
+                    return t
+            except Exception as e:
+                if extra:
+                    print(f"Gemini new SDK (JSON mode): {e!s} — retrying without response_mime_type", flush=True)
+                    continue
+                raise
+        return ""
 
     def _call_old_sdk_once() -> str:
         try:
@@ -347,14 +438,28 @@ def gemini_trade_decision(
             model_name,
             system_instruction=system_instruction or "You output only valid JSON.",
         )
-        resp = model.generate_content(
-            full_user_prompt,
-            generation_config={
-                "temperature": 0.2,
-                "max_output_tokens": 1024,
-            },
-        )
+        gen_cfg: dict[str, Any] = {
+            "temperature": 0.2,
+            "max_output_tokens": max_out,
+            "response_mime_type": "application/json",
+        }
+        try:
+            resp = model.generate_content(full_user_prompt, generation_config=gen_cfg)
+        except Exception:
+            gen_cfg.pop("response_mime_type", None)
+            resp = model.generate_content(full_user_prompt, generation_config=gen_cfg)
         return _extract_text_from_genai_response(resp)
+
+    def _skip_legacy_after_json_fragment(text_new: str) -> bool:
+        if os.environ.get("TA_GEMINI_SKIP_LEGACY_ON_JSON_FRAGMENT", "1").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return False
+        tn = text_new.strip()
+        return tn.startswith("{") and '"action"' in tn and len(tn) > 20
 
     def _sleep_for_429(err: BaseException) -> None:
         delay = _retry_delay_seconds_from_error(err)
@@ -378,6 +483,13 @@ def gemini_trade_decision(
                 return parsed
             snip = text_new[:500].replace("\n", " ")
             print(f"Gemini: new SDK text did not parse as JSON; sample={snip!r}", flush=True)
+            if _skip_legacy_after_json_fragment(text_new):
+                print(
+                    "Gemini: skipping legacy SDK (JSON fragment from new SDK; "
+                    "raise GEMINI_MAX_OUTPUT_TOKENS or fix model)",
+                    flush=True,
+                )
+                return None
             print("Gemini: trying legacy SDK", flush=True)
 
         try:

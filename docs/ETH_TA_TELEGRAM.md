@@ -130,6 +130,8 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
 | **`TA_GEMINI_TIMEOUT_SEC`** | **`45`** | Gemini request timeout in seconds (per SDK attempt). |
 | **`TA_GEMINI_429_RETRIES`** | **`3`** | On HTTP 429 / quota backoff, sleep and retry up to this many extra attempts. |
+| **`GEMINI_MAX_OUTPUT_TOKENS`** | **`2048`** | Max tokens for the model reply (raise if JSON is cut off mid-field). |
+| **`TA_GEMINI_SKIP_LEGACY_ON_JSON_FRAGMENT`** | **`1`** | If **`1`**, do not call legacy `google.generativeai` when the new SDK already returned a `{` JSON fragment (avoids unrelated prose from a second generation). |
 | **`TA_GEMINI_PAUSE_UNTIL_FLAT`** | **`1`** | **`1`** = no Gemini API calls while a **live or TA-SIM** position is open (wait for TP/SL close). |
 | **`TA_GEMINI_SINGLE_CALL_PER_CYCLE`** | **`1`** | **`1`** = one shared Gemini request per 5m loop (digest + live + TA-SIM share the same response). Set **`0`** to allow separate calls (uses more quota). |
 
@@ -226,6 +228,8 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
 | `TA_GEMINI_TIMEOUT_SEC` | `45` | Gemini API timeout in seconds (per attempt) |
 | `TA_GEMINI_429_RETRIES` | `3` | Retries after rate limit / 429 with server-suggested backoff |
+| `GEMINI_MAX_OUTPUT_TOKENS` | `2048` | Increase if Gemini JSON is truncated |
+| `TA_GEMINI_SKIP_LEGACY_ON_JSON_FRAGMENT` | `1` | Skip legacy SDK when new SDK already returned partial JSON |
 | `TA_GEMINI_PAUSE_UNTIL_FLAT` | `1` | `1` = skip Gemini API while a position is open |
 | `TA_GEMINI_SINGLE_CALL_PER_CYCLE` | `1` | `1` = one Gemini call per loop shared by digest + trading paths |
 | `GEMINI_API_KEY` | — | Required if Gemini enabled |
