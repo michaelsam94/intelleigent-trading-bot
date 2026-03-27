@@ -164,6 +164,9 @@ def parse_gemini_trade_json(raw: str) -> dict[str, Any] | None:
         sl_f = float(sl) if sl is not None else None
     except (TypeError, ValueError):
         sl_f = None
+    tp1 = _to_float_or_none(data.get("tp1"))
+    if tp_f is None and tp1 is not None:
+        tp_f = tp1
     return {
         "action": action,
         "take_profit": tp_f,
@@ -193,7 +196,7 @@ def gemini_trade_decision(
     if not api_key:
         return None
     timeout_s = float(os.environ.get("TA_GEMINI_TIMEOUT_SEC", "20") or 20.0)
-    model_name = (os.environ.get("GEMINI_MODEL") or "gemini-1.5-flash").strip() or "gemini-1.5-flash"
+    model_name = (os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
     def _run_with_timeout(fn):
         with ThreadPoolExecutor(max_workers=1) as ex:

@@ -129,6 +129,8 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_GEMINI_MASTER_PROMPT`** | **`0`** | Set to **`1`** to use the Master TA prompt format (direction, conviction, entry zone, TP/SL, invalidation fields). |
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
 | **`TA_GEMINI_TIMEOUT_SEC`** | **`20`** | Gemini request timeout in seconds; helps avoid long blocking calls during a digest cycle. |
+| **`TA_GEMINI_PAUSE_UNTIL_FLAT`** | **`1`** | **`1`** = no Gemini API calls while a **live or TA-SIM** position is open (wait for TP/SL close). |
+| **`TA_GEMINI_SINGLE_CALL_PER_CYCLE`** | **`1`** | **`1`** = one shared Gemini request per 5m loop (digest + live + TA-SIM share the same response). Set **`0`** to allow separate calls (uses more quota). |
 
 Gemini is **not** used when **`TA_OPEN_EVERY_DIGEST=1`** (open-every mode always wins).
 
@@ -222,8 +224,10 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = use Master TA prompt JSON schema (direction/conviction/entry zone/invalidation + action/TP/SL) |
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
 | `TA_GEMINI_TIMEOUT_SEC` | `20` | Gemini API timeout in seconds (applies to both new and legacy SDK client paths) |
+| `TA_GEMINI_PAUSE_UNTIL_FLAT` | `1` | `1` = skip Gemini API while a position is open |
+| `TA_GEMINI_SINGLE_CALL_PER_CYCLE` | `1` | `1` = one Gemini call per loop shared by digest + trading paths |
 | `GEMINI_API_KEY` | — | Required if Gemini enabled |
-| `GEMINI_MODEL` | `gemini-1.5-flash` | Optional model name |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Optional model name (code default if unset) |
 
 ## ML trading vs TA-sim
 

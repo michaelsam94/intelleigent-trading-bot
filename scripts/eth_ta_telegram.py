@@ -39,7 +39,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_USE_GEMINI=0              # 1=enable Gemini for entries; 0=disable (TA score only). Alias: TA_GEMINI_ENABLED
   TA_GEMINI_ENABLED=0          # if TA_USE_GEMINI unset, same meaning as TA_USE_GEMINI
   GEMINI_API_KEY=...           # required when Gemini enabled
-  GEMINI_MODEL=gemini-1.5-flash
+  GEMINI_MODEL=gemini-2.0-flash
 
   TA_ENTRY_ON_SIGNAL_BANNER=0  # if 1: open LONG/SHORT when 📌 BULLISH/BEARISH banner fires (same TP%/SL% as open-every); falls back to Gemini/mean if no banner
   TA_SIGNAL_ON_5M=1           # if 1 (default): 📌 banner + mean-score/Gemini entries use 5m TF score/label, not mean TF score; set 0 for legacy mean-TF behavior
@@ -76,6 +76,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -272,6 +273,64 @@ def _gemini_override_open_every_enabled() -> bool:
 def _gemini_signal_digest_enabled() -> bool:
     """Whether to append a Gemini signal section to every 5m digest."""
     return _gemini_entries_env_enabled() and _sf_sub("TA_GEMINI_SIGNAL_EVERY_DIGEST", "0")
+
+
+def _gemini_pause_until_flat_enabled() -> bool:
+    """No Gemini API calls while a live or TA-SIM position is open (until TP/SL close)."""
+    return _sf_sub("TA_GEMINI_PAUSE_UNTIL_FLAT", "1")
+
+
+def _ta_sim_position_open(symbol: str) -> bool:
+    p = _load_position(symbol)
+    return bool(p and p.get("open"))
+
+
+def _gemini_api_paused(symbol: str, trade_sim: bool, trade_live: bool) -> bool:
+    if not _gemini_pause_until_flat_enabled():
+        return False
+    if trade_live:
+        try:
+            sym = os.environ.get("TA_FUTURES_SYMBOL", symbol).strip().upper()
+            if abs(_futures_position_amt(_client(), sym)) > 1e-12:
+                return True
+        except Exception:
+            pass
+    if trade_sim and _ta_sim_position_open(symbol):
+        return True
+    return False
+
+
+def _gemini_single_call_per_cycle_enabled() -> bool:
+    return _sf_sub("TA_GEMINI_SINGLE_CALL_PER_CYCLE", "1")
+
+
+def _gemini_cycle_needs_api(symbol: str, trade_sim: bool, trade_live: bool) -> bool:
+    if not _gemini_entries_env_enabled():
+        return False
+    if _gemini_signal_digest_enabled():
+        return True
+    if trade_live and _gemini_live_entries_enabled():
+        return True
+    if trade_sim:
+        oe = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
+        if not oe:
+            return True
+    return False
+
+
+def _run_shared_gemini_decision(symbol: str, snap: TASnapshot) -> dict[str, Any] | None:
+    if snap.df_5m is None or len(snap.df_5m) < 2:
+        return None
+    close_price = float(snap.df_5m["close"].iloc[-1])
+    return run_gemini_decision(
+        symbol,
+        close_price,
+        snap.text,
+        snap.tf_scores,
+        snap.tf_labels,
+        snap.score_for_entry,
+        aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+    )
 
 
 def _signal_filters_enabled() -> bool:
@@ -943,10 +1002,15 @@ def _futures_available_usdt(client: Client) -> float:
     return 0.0
 
 
-def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float] | None:
+def _decide_ta_entry(
+    snap: TASnapshot,
+    *,
+    gemini_dec: dict[str, Any] | None = None,
+) -> tuple[str, float, float, float, float] | None:
     """
     Decide entry from current TA logic.
     Returns (side, close_price, tp_price, sl_price, lev) or None.
+    If gemini_dec is provided (shared per-cycle call), live Gemini path uses it instead of a new API request.
     """
     if snap.df_5m is None or len(snap.df_5m) < 60:
         return None
@@ -995,38 +1059,36 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
         elif want_short and not want_long:
             side = "SHORT"
     if not side and use_gemini_live:
-        dec = None
-        try:
-            dec = run_gemini_decision(
-                os.environ.get("TA_FUTURES_SYMBOL", os.environ.get("TA_SYMBOL", "ETHUSDC")).strip().upper(),
-                close_price,
-                snap.text,
-                snap.tf_scores,
-                snap.tf_labels,
-                snap.score_for_entry,
-                aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
-            )
-        except Exception as e:
-            print(f"LIVE Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+        dec = gemini_dec
+        if dec is None:
+            try:
+                dec = run_gemini_decision(
+                    os.environ.get("TA_FUTURES_SYMBOL", os.environ.get("TA_SYMBOL", "ETHUSDC")).strip().upper(),
+                    close_price,
+                    snap.text,
+                    snap.tf_scores,
+                    snap.tf_labels,
+                    snap.score_for_entry,
+                    aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+                )
+            except Exception as e:
+                print(f"LIVE Gemini decision failed: {e} — falling back to TA score entry", flush=True)
         if dec:
             action = str(dec.get("action", "HOLD")).upper()
             if action in ("LONG", "SHORT"):
                 tp_raw = dec.get("take_profit")
                 sl_raw = dec.get("stop_loss")
                 tp_v, sl_v = validate_tp_sl(action, close_price, tp_raw, sl_raw)
-                side = action
                 if tp_v is not None and sl_v is not None:
+                    side = action
                     tp_price, sl_price = tp_v, sl_v
                     print(
                         f"LIVE Gemini used: action={action} tp={tp_price:.2f} sl={sl_price:.2f}",
                         flush=True,
                     )
                 else:
-                    tp_price, sl_price, _ = _fixed_tp_sl_levels(
-                        side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig
-                    )
                     print(
-                        f"LIVE Gemini used action={action}, but TP/SL invalid; using TA fallback TP/SL",
+                        "LIVE Gemini SKIP: invalid TP/SL from model (no .env/ATR fallback for Gemini entries)",
                         flush=True,
                     )
             else:
@@ -1049,7 +1111,13 @@ def _decide_ta_entry(snap: TASnapshot) -> tuple[str, float, float, float, float]
     return side, close_price, tp_price, sl_price, lev
 
 
-def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> None:
+def process_ta_trade_live_futures(
+    symbol: str,
+    snap: TASnapshot,
+    token: str,
+    *,
+    gemini_dec: dict[str, Any] | None = None,
+) -> None:
     """Live Binance USD-M futures execution (env-gated)."""
     fut_symbol = os.environ.get("TA_FUTURES_SYMBOL", symbol).strip().upper()
     client = _client()
@@ -1058,16 +1126,17 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
             broadcast_telegram_plain(token, msg, {})
         print(msg, flush=True)
 
-    dec = _decide_ta_entry(snap)
-    if dec is None:
-        print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
-        return
-    side, close_price, tp_price, sl_price, lev = dec
-    # one-position-only
+    # one-position-only: check before Gemini/TA entry work (avoids extra API calls)
     pos_amt = _futures_position_amt(client, fut_symbol)
     if abs(pos_amt) > 1e-12:
         print(f"LIVE skip: existing futures position amount on {fut_symbol}: {pos_amt}", flush=True)
         return
+
+    dec = _decide_ta_entry(snap, gemini_dec=gemini_dec)
+    if dec is None:
+        print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
+        return
+    side, close_price, tp_price, sl_price, lev = dec
     _futures_setup(client, fut_symbol, int(lev), isolated=True)
     tick, step, min_qty, min_notional = _futures_symbol_filters(client, fut_symbol)
     order_book = client.futures_order_book(symbol=fut_symbol, limit=5)
@@ -1231,7 +1300,13 @@ def process_ta_trade_live_futures(symbol: str, snap: TASnapshot, token: str) -> 
     )
 
 
-def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
+def process_ta_trade_sim(
+    symbol: str,
+    snap: TASnapshot,
+    token: str,
+    *,
+    gemini_dec: dict[str, Any] | None = None,
+) -> None:
     """Paper trade from mean TA score; TP/SL/fees same as ML trader_simulation defaults."""
     if snap.df_5m is None or len(snap.df_5m) < 60:
         return
@@ -1463,19 +1538,20 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
         if not gemini_key:
             print("Gemini enabled but GEMINI_API_KEY is empty — falling back to TA score entry", flush=True)
         else:
-            dec = None
-            try:
-                dec = run_gemini_decision(
-                    symbol,
-                    close_price,
-                    snap.text,
-                    snap.tf_scores,
-                    snap.tf_labels,
-                    snap.score_for_entry,
-                    aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
-                )
-            except Exception as e:
-                print(f"Gemini decision failed: {e} — falling back to TA score entry", flush=True)
+            dec = gemini_dec
+            if dec is None:
+                try:
+                    dec = run_gemini_decision(
+                        symbol,
+                        close_price,
+                        snap.text,
+                        snap.tf_scores,
+                        snap.tf_labels,
+                        snap.score_for_entry,
+                        aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+                    )
+                except Exception as e:
+                    print(f"Gemini decision failed: {e} — falling back to TA score entry", flush=True)
             if dec:
                 action = str(dec.get("action", "HOLD")).upper()
                 if action in ("LONG", "SHORT"):
@@ -1487,21 +1563,18 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
                         tp_price, sl_price = tp_v, sl_v
                         reason = "gemini_prices"
                     else:
-                        side = action
-                        if action == "LONG":
-                            tp_price = close_price + atr * tp_mult
-                            sl_price = close_price - atr * sl_mult
-                        else:
-                            tp_price = close_price - atr * tp_mult
-                            sl_price = close_price + atr * sl_mult
-                        reason = "gemini_atr_fallback"
-                    gemini_note = (dec.get("rationale") or "")[:500]
-                    conf = dec.get("confidence", 0)
-                    open_extra = (
-                        f"Gemini conf={conf} | {reason}\n{gemini_note}"
-                        if gemini_note
-                        else f"Gemini conf={conf} | {reason}"
-                    )
+                        print(
+                            "TA-SIM Gemini SKIP: invalid TP/SL from model (no ATR fallback for Gemini entries)",
+                            flush=True,
+                        )
+                    if side:
+                        gemini_note = (dec.get("rationale") or "")[:500]
+                        conf = dec.get("confidence", 0)
+                        open_extra = (
+                            f"Gemini conf={conf} | {reason}\n{gemini_note}"
+                            if gemini_note
+                            else f"Gemini conf={conf} | {reason}"
+                        )
                 else:
                     print(
                         f"Gemini action={action} — falling back to TA score entry if thresholds match",
@@ -1602,24 +1675,35 @@ def process_ta_trade_sim(symbol: str, snap: TASnapshot, token: str) -> None:
     )
 
 
-def _build_gemini_signal_block(symbol: str, snap: TASnapshot) -> str:
+def _build_gemini_signal_block(
+    symbol: str,
+    snap: TASnapshot,
+    *,
+    precomputed: dict[str, Any] | None = None,
+    trade_sim: bool = False,
+    trade_live: bool = False,
+) -> str:
     """Optional digest section: Gemini direction + execution levels each cycle."""
+    if _gemini_api_paused(symbol, trade_sim, trade_live):
+        return "🤖 Gemini signal: paused (open position — no API calls until TP/SL close)"
     if snap.df_5m is None or len(snap.df_5m) < 2:
         return "🤖 Gemini signal: unavailable (insufficient 5m data)"
     close_price = float(snap.df_5m["close"].iloc[-1])
-    try:
-        dec = run_gemini_decision(
-            symbol,
-            close_price,
-            snap.text,
-            snap.tf_scores,
-            snap.tf_labels,
-            snap.score_for_entry,
-            aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
-        )
-    except Exception as e:
-        print(f"Gemini digest signal unavailable: {e}", flush=True)
-        return f"🤖 Gemini signal: unavailable ({e})"
+    dec = precomputed
+    if dec is None:
+        try:
+            dec = run_gemini_decision(
+                symbol,
+                close_price,
+                snap.text,
+                snap.tf_scores,
+                snap.tf_labels,
+                snap.score_for_entry,
+                aggregate_score_label="5m score" if snap.entry_score_kind == "5m" else "Mean score",
+            )
+        except Exception as e:
+            print(f"Gemini digest signal unavailable: {e}", flush=True)
+            return f"🤖 Gemini signal: unavailable ({e})"
     if not dec:
         print("Gemini digest signal unavailable: empty response", flush=True)
         return "🤖 Gemini signal: unavailable (empty response)"
@@ -1702,7 +1786,9 @@ def main() -> int:
         f"gemini_for_live={_gemini_live_entries_enabled()} "
         f"gemini_override_open_every={_gemini_override_open_every_enabled()} "
         f"gemini_signal_every_digest={_gemini_signal_digest_enabled()} "
-        f"(entry Gemini is bypassed when TA_OPEN_EVERY_DIGEST=1)",
+        f"gemini_pause_until_flat={_gemini_pause_until_flat_enabled()} "
+        f"gemini_single_call={_gemini_single_call_per_cycle_enabled()} "
+        f"(open-every bypasses Gemini entry unless TA_GEMINI_OVERRIDE_OPEN_EVERY=1)",
         flush=True,
     )
     print(
@@ -1751,12 +1837,44 @@ def main() -> int:
             msg = snap.text
             if snap.banner:
                 msg = snap.banner + "\n\n" + msg
+
+            gemini_dec: dict[str, Any] | None = None
+            if (
+                _gemini_entries_env_enabled()
+                and not _gemini_api_paused(symbol, trade_sim, trade_live)
+                and _gemini_cycle_needs_api(symbol, trade_sim, trade_live)
+                and _gemini_single_call_per_cycle_enabled()
+            ):
+                try:
+                    gemini_dec = _run_shared_gemini_decision(symbol, snap)
+                    if gemini_dec:
+                        a = str(gemini_dec.get("action", "HOLD")).upper()
+                        print(f"Gemini shared call OK: action={a}", flush=True)
+                except Exception as e:
+                    print(f"Gemini shared call failed: {e}", flush=True)
+
             if _gemini_signal_digest_enabled():
-                msg = msg + "\n\n---\n" + _build_gemini_signal_block(symbol, snap)
+                msg = msg + "\n\n---\n" + _build_gemini_signal_block(
+                    symbol,
+                    snap,
+                    precomputed=gemini_dec if _gemini_single_call_per_cycle_enabled() else None,
+                    trade_sim=trade_sim,
+                    trade_live=trade_live,
+                )
             if trade_sim:
-                process_ta_trade_sim(symbol, snap, token)
+                process_ta_trade_sim(
+                    symbol,
+                    snap,
+                    token,
+                    gemini_dec=gemini_dec if _gemini_single_call_per_cycle_enabled() else None,
+                )
             elif trade_live:
-                process_ta_trade_live_futures(symbol, snap, token)
+                process_ta_trade_live_futures(
+                    symbol,
+                    snap,
+                    token,
+                    gemini_dec=gemini_dec if _gemini_single_call_per_cycle_enabled() else None,
+                )
             elif not _suppress_trade_sim_digest_hint():
                 msg += (
                     "\n\n---\n"
