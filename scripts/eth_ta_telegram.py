@@ -352,6 +352,26 @@ def _reverse_signals_enabled() -> bool:
     return os.environ.get("TA_REVERSE_SIGNALS", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _reverse_keep_gemini_tp_sl_enabled() -> bool:
+    """With TA_REVERSE_SIGNALS, flip side but keep Gemini's two exit prices (swap TP/SL roles for new side)."""
+    return _sf_sub("TA_REVERSE_KEEP_GEMINI_TP_SL", "0")
+
+
+def _flip_side_keep_gemini_tp_sl(
+    side: str, close_price: float, tp_price: float, sl_price: float
+) -> tuple[str, float, float] | None:
+    """
+    Opposite direction, same model prices: swap TP/SL numerics so LONG has TP>SL and SHORT has TP<SL vs entry.
+    Returns None if invalid vs close.
+    """
+    flipped = _opposite_side(side)
+    tp_sw, sl_sw = sl_price, tp_price
+    tp_v, sl_v = validate_tp_sl(flipped, close_price, tp_sw, sl_sw)
+    if tp_v is None or sl_v is None:
+        return None
+    return flipped, tp_v, sl_v
+
+
 def _opposite_side(side: str) -> str:
     s = (side or "").strip().upper()
     if s == "LONG":
@@ -1107,6 +1127,7 @@ def _decide_ta_entry(
     tp_price = 0.0
     sl_price = 0.0
     live_gemini_zone: tuple[float, float] | None = None
+    levels_from_gemini = False
     open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
@@ -1179,6 +1200,7 @@ def _decide_ta_entry(
                 if tp_v is not None and sl_v is not None:
                     side = action
                     tp_price, sl_price = tp_v, sl_v
+                    levels_from_gemini = True
                     if _sf_sub("TA_GEMINI_USE_ENTRY_ZONE", "1"):
                         z = _parse_gemini_entry_zone(dec)
                         if z:
@@ -1211,7 +1233,29 @@ def _decide_ta_entry(
     reverse_on = _reverse_signals_enabled()
     if reverse_on:
         live_gemini_zone = None
-        if tp_price > 0 and sl_price > 0:
+        if (
+            _reverse_keep_gemini_tp_sl_enabled()
+            and levels_from_gemini
+            and tp_price > 0
+            and sl_price > 0
+        ):
+            kept = _flip_side_keep_gemini_tp_sl(side, close_price, tp_price, sl_price)
+            if kept is not None:
+                side, tp_price, sl_price = kept
+                print(
+                    "LIVE reverse: flipped side, Gemini exit prices (TP/SL swapped for new side; "
+                    "TA_REVERSE_KEEP_GEMINI_TP_SL=1).",
+                    flush=True,
+                )
+            else:
+                side, tp_price, sl_price = _reverse_side_and_levels(
+                    side, close_price, tp_price, sl_price
+                )
+                print(
+                    "LIVE reverse: swapped Gemini levels invalid vs close — mirrored TP/SL.",
+                    flush=True,
+                )
+        elif tp_price > 0 and sl_price > 0:
             side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
         else:
             side = _opposite_side(side)
@@ -1632,6 +1676,7 @@ def process_ta_trade_sim(
     gemini_note = ""
     opened_from_banner = False
     last_fixed_mode = ""
+    levels_from_gemini = False
 
     tpm_atr = float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
     slm_atr = float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
@@ -1738,6 +1783,7 @@ def process_ta_trade_sim(
                     if tp_v is not None and sl_v is not None:
                         side = action
                         tp_price, sl_price = tp_v, sl_v
+                        levels_from_gemini = True
                         reason = "gemini_prices"
                     else:
                         print(
@@ -1808,11 +1854,27 @@ def process_ta_trade_sim(
         return
 
     if _reverse_signals_enabled():
-        side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
-        if open_extra:
-            open_extra = f"{open_extra} | reversed signals"
+        rev_note = "reversed signals"
+        if (
+            _reverse_keep_gemini_tp_sl_enabled()
+            and levels_from_gemini
+            and tp_price > 0
+            and sl_price > 0
+        ):
+            kept = _flip_side_keep_gemini_tp_sl(side, close_price, tp_price, sl_price)
+            if kept is not None:
+                side, tp_price, sl_price = kept
+                rev_note = "reversed side, kept Gemini exit prices (TP/SL swapped)"
+            else:
+                side, tp_price, sl_price = _reverse_side_and_levels(
+                    side, close_price, tp_price, sl_price
+                )
+                rev_note = "reversed signals (mirrored TP/SL — Gemini swap invalid vs close)"
+        elif tp_price > 0 and sl_price > 0:
+            side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
         else:
-            open_extra = "reversed signals"
+            side = _opposite_side(side)
+        open_extra = f"{open_extra} | {rev_note}" if open_extra else rev_note
 
     ok, skip_reason = _entry_filters_pass(snap, side, df)
     if not ok:

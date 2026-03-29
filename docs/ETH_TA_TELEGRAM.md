@@ -44,6 +44,8 @@ TA_REAL_ENTRY_TIMEOUT_SEC=20
 # Set to 0 to skip polling: place GTC entry + TP/SL (if pre-place on) and return immediately:
 # TA_REAL_ENTRY_WAIT_FOR_FILL=0
 TA_REVERSE_SIGNALS=0
+# With reverse + Gemini: keep model TP/SL prices (swap roles) instead of mirroring around close:
+# TA_REVERSE_KEEP_GEMINI_TP_SL=1
 ```
 
 Switch to live only when ready:
@@ -224,6 +226,7 @@ pm2 logs eth-ta-telegram
 | `TA_TP_SL_MARGIN_PCT` | `1` | `1` = `TA_TP_PRICE_PCT` / `TA_SL_PRICE_PCT` are **margin** targets (price move ÷ leverage); `0` = **spot** % |
 | `TA_SIGNAL_FILTERS` | `0` | `1` = stricter TA-SIM entries (score band, ADX/MACD, 15m/1h); see section above |
 | `TA_REVERSE_SIGNALS` | `0` | `1` = invert entry direction for TA/Gemini/banner/open-every (LONG signal places SHORT, SHORT signal places LONG) in both TA-SIM and live futures |
+| `TA_REVERSE_KEEP_GEMINI_TP_SL` | `0` | With **`TA_REVERSE_SIGNALS=1`** and **Gemini** TP/SL: **`1`** = flip side only and keep the model’s two exit **prices** (swap which is TP vs SL so geometry matches the new side); **`0`** = mirror TP/SL around last close (previous behavior). Falls back to mirror if swapped levels fail `validate_tp_sl` vs close. |
 | `TA_SF_LONG_MIN` / `TA_SF_SHORT_MAX` | `2.0` / `-2.0` | 5m score limits when `TA_SF_SCORE_FILTER=1` |
 | `TA_SF_ADX_MIN` | `20` | Min ADX on 5m; **`-1`** disables ADX check |
 | `TA_SF_HT_BEARISH_MAX` / `TA_SF_HT_BULLISH_MIN` | `-0.5` / `0.5` | HTF thresholds for blocking LONG / SHORT |
