@@ -65,6 +65,14 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
     → TA_SIGNAL_FILTERS=1 TA_ENTRY_ON_SIGNAL_BANNER=0
   TA_OPEN_EVERY_MIN_ABS_SCORE=0   # when TA_OPEN_EVERY_DIGEST=1: only LONG if 5m score >= N, SHORT if <= -N; 0 = sign-only
   TA_OPEN_EVERY_STRONG_5M_ONLY=0  # when 1: open-every only if 5m label is Strong Buy (LONG) or Strong Sell (SHORT); ignores min-abs gate
+
+  30_MAR — multi-timeframe confluence (disables all Gemini API use when enabled):
+  TA_STRATEGY_30_MAR=0         # 1=entries from MTF confluence only; TA_USE_GEMINI ignored (no digest/entry Gemini calls)
+  TA_30_MAR_ADX_DAILY_MIN=20   # logged / optional boost for "high" short tier when daily ADX above this
+  TA_30_MAR_TP_ATR_FULL=2.5 TA_30_MAR_SL_ATR_FULL=1.0      # high-confluence short (≥4 of 5m/15m/30m/1h ≤ -2, daily bearish)
+  TA_30_MAR_TP_ATR_STRONG=2.0 TA_30_MAR_SL_ATR_STRONG=1.3 # strong short (≥3 TF ≤ -2 + 5m+1h+1d bear)
+  TA_30_MAR_TP_ATR_LONG=2.0 TA_30_MAR_SL_ATR_LONG_SL=1.3 # trend long (5m+1h+1d bull, daily not strong sell)
+  TA_30_MAR_TP_ATR_COUNTER=1.0 TA_30_MAR_SL_ATR_COUNTER=0.7  # mean-reversion long (W%R extrema + pivot + vol spike)
 """
 from __future__ import annotations
 
@@ -248,11 +256,19 @@ def _suppress_trade_sim_digest_hint() -> bool:
     )
 
 
+def _strategy_30_mar_enabled() -> bool:
+    """30_MAR MTF confluence strategy; when on, Gemini must not run (entries + digest)."""
+    return _sf_sub("TA_STRATEGY_30_MAR", "0")
+
+
 def _gemini_entries_env_enabled() -> bool:
     """
     Whether Gemini is enabled for paper-trade entries (before TA_OPEN_EVERY_DIGEST turns it off).
     TA_USE_GEMINI wins if set; otherwise TA_GEMINI_ENABLED (default off).
+    Disabled entirely when TA_STRATEGY_30_MAR=1.
     """
+    if _strategy_30_mar_enabled():
+        return False
     primary = os.environ.get("TA_USE_GEMINI")
     if primary is not None and str(primary).strip() != "":
         v = str(primary).strip().lower()
@@ -599,6 +615,215 @@ def _adx_macd_from_df(df: pd.DataFrame) -> tuple[float | None, float | None]:
     return adx, _last(hist)
 
 
+def _scalar_rsi_df(df: pd.DataFrame) -> float | None:
+    c = df["close"].values.astype(float)
+    if len(c) < 20:
+        return None
+    return _last(talib.RSI(c, timeperiod=14))
+
+
+def _scalar_willr_df(df: pd.DataFrame) -> float | None:
+    h = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    c = df["close"].values.astype(float)
+    if len(c) < 20:
+        return None
+    return _last(talib.WILLR(h, low, c, timeperiod=14))
+
+
+def _scalar_adx_df(df: pd.DataFrame) -> float | None:
+    h = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    c = df["close"].values.astype(float)
+    if len(c) < 60:
+        return None
+    return _last(talib.ADX(h, low, c, timeperiod=14))
+
+
+def _fetch_mtf_bundle_30_mar(
+    client: Client,
+    symbol: str,
+    limit: int,
+    score_5m: float,
+    df_5m: pd.DataFrame | None,
+) -> tuple[dict[str, float], dict[str, float | None], dict[str, float | None], float | None, dict[str, float] | None, bool]:
+    """Scores for 5m/15m/30m/1h/1d/1w plus RSI/W%R, daily ADX, prior-day pivot, 5m volume spike."""
+    mtf: dict[str, float] = {"5m": float(score_5m)}
+    rsi_m: dict[str, float | None] = {}
+    wr_m: dict[str, float | None] = {}
+    adx_daily: float | None = None
+    pivot: dict[str, float] | None = None
+    vol_spike = False
+
+    for interval in ("15m", "30m", "1h", "1w"):
+        try:
+            kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+            if not kl or len(kl) < 60:
+                continue
+            dfx = _klines_to_df(kl)
+            sc, _ = _analyze_ohlcv(dfx)
+            mtf[interval] = float(sc)
+            if interval == "1w":
+                rsi_m["1w"] = _scalar_rsi_df(dfx)
+                wr_m["1w"] = _scalar_willr_df(dfx)
+        except Exception:
+            continue
+
+    try:
+        kl_d = client.get_klines(symbol=symbol, interval="1d", limit=max(limit, 120))
+        if kl_d and len(kl_d) >= 60:
+            df_d = _klines_to_df(kl_d)
+            sc_d, _ = _analyze_ohlcv(df_d)
+            mtf["1d"] = float(sc_d)
+            rsi_m["1d"] = _scalar_rsi_df(df_d)
+            wr_m["1d"] = _scalar_willr_df(df_d)
+            adx_daily = _scalar_adx_df(df_d)
+            if len(df_d) >= 2:
+                pivot = _pivot_classic(df_d.iloc[-2])
+    except Exception:
+        pass
+
+    if df_5m is not None and len(df_5m) >= 20:
+        rsi_m["5m"] = _scalar_rsi_df(df_5m)
+        wr_m["5m"] = _scalar_willr_df(df_5m)
+        vol = df_5m["volume"].astype(float)
+        if len(vol) >= 20:
+            sma_v = float(vol.iloc[-20:].mean())
+            if sma_v > 0:
+                vol_spike = float(vol.iloc[-1]) > 1.5 * sma_v
+
+    return mtf, rsi_m, wr_m, adx_daily, pivot, vol_spike
+
+
+def _30_mar_conflict_window(snap: TASnapshot) -> bool:
+    """5m vs daily (and weekly when present) opposed + RSI neutral on 1d and 1w → wait."""
+    m = snap.mtf_30mar
+    if not m or "5m" not in m or "1d" not in m:
+        return False
+    s5, sd = float(m["5m"]), float(m["1d"])
+    sw = float(m["1w"]) if "1w" in m else None
+    opposed_d = (s5 > 0.3 and sd < -0.3) or (s5 < -0.3 and sd > 0.3)
+    if not opposed_d:
+        return False
+    if sw is not None:
+        opposed_w = (s5 > 0.3 and sw < -0.3) or (s5 < -0.3 and sw > 0.3)
+        if not opposed_w:
+            return False
+    rd = snap.mar_rsi.get("1d")
+    rw = snap.mar_rsi.get("1w")
+    if rd is None:
+        return False
+    if rw is None and sw is not None:
+        return False
+    rsi_w_ok = True
+    if rw is not None:
+        rsi_w_ok = 40.0 <= rw <= 60.0
+    return 40.0 <= rd <= 60.0 and rsi_w_ok
+
+
+def _30_mar_near_pivot_support(close: float, piv: dict[str, float]) -> bool:
+    for k in ("S1", "S2"):
+        lvl = piv.get(k)
+        if lvl and close > 0 and abs(close - float(lvl)) / close * 100.0 <= 0.2:
+            return True
+    return False
+
+
+def _30_mar_rejection_candle(row: pd.Series, piv: dict[str, float]) -> bool:
+    lo = float(row["low"])
+    op = float(row["open"])
+    cl = float(row["close"])
+    s1, s2 = piv.get("S1"), piv.get("S2")
+    if s1 is None or s2 is None:
+        return False
+    floor = min(float(s1), float(s2))
+    return lo <= floor * 1.002 and cl > op
+
+
+def _evaluate_30_mar_entry(snap: TASnapshot) -> tuple[str | None, str, float | None, float | None]:
+    """
+    MTF confluence entry. Returns (side, reason, tp_atr_mult, sl_atr_mult); mults None → env defaults.
+    """
+    m = snap.mtf_30mar
+    if not m:
+        return None, "30_MAR: no MTF data", None, None
+    for req in ("5m", "1h", "1d"):
+        if req not in m:
+            return None, f"30_MAR: missing {req} score", None, None
+
+    def sc(k: str) -> float:
+        return float(m[k])
+
+    def lb(k: str) -> str:
+        return _tf_label(sc(k))
+
+    if _30_mar_conflict_window(snap):
+        return None, "30_MAR: conflict window (5m vs D/W + HTF RSI 40–60)", None, None
+
+    sd, s5, s1h = sc("1d"), sc("5m"), sc("1h")
+    lb_d = lb("1d")
+    daily_bearish = sd <= -0.8 or lb_d in ("Sell", "Strong Sell")
+
+    ltf_keys = ("5m", "15m", "30m", "1h")
+    bear_le2 = sum(1 for k in ltf_keys if k in m and sc(k) <= -2.0)
+    bull_ge2 = sum(1 for k in ltf_keys if k in m and sc(k) >= 2.0)
+
+    three_bear = s5 <= -0.8 and s1h <= -0.8 and sd <= -0.8
+    three_bull = s5 >= 0.8 and s1h >= 0.8 and sd >= 0.8
+
+    tpm_f = float(os.environ.get("TA_30_MAR_TP_ATR_FULL", "2.5"))
+    slm_f = float(os.environ.get("TA_30_MAR_SL_ATR_FULL", "1.0"))
+    tpm_s = float(os.environ.get("TA_30_MAR_TP_ATR_STRONG", "2.0"))
+    slm_s = float(os.environ.get("TA_30_MAR_SL_ATR_STRONG", "1.3"))
+    tpm_l = float(os.environ.get("TA_30_MAR_TP_ATR_LONG", "2.0"))
+    slm_l = float(os.environ.get("TA_30_MAR_SL_ATR_LONG_SL", "1.3"))
+    tpm_c = float(os.environ.get("TA_30_MAR_TP_ATR_COUNTER", "1.0"))
+    slm_c = float(os.environ.get("TA_30_MAR_SL_ATR_COUNTER", "0.7"))
+
+    adx_min = float(os.environ.get("TA_30_MAR_ADX_DAILY_MIN", "20"))
+    adx_note = (
+        snap.mar_adx_daily is not None and snap.mar_adx_daily > adx_min
+    )
+
+    if daily_bearish and bear_le2 >= 4:
+        tag = "high SHORT"
+        if adx_note:
+            tag += f" (daily ADX>{adx_min:.0f})"
+        return "SHORT", f"30_MAR {tag}: {bear_le2} LTF ≤-2 + daily bearish", tpm_f, slm_f
+
+    if daily_bearish and bear_le2 >= 3 and three_bear:
+        return "SHORT", f"30_MAR strong SHORT: {bear_le2} LTF ≤-2 + 5m+1h+1d bear", tpm_s, slm_s
+
+    daily_strong_sell = lb_d == "Strong Sell" or sd <= -2.5
+    if not daily_strong_sell and sd >= -0.5 and three_bull and bull_ge2 >= 2:
+        return "LONG", "30_MAR trend LONG: 5m+1h+1d bull, daily neutral/buy, MTF aligned", tpm_l, slm_l
+
+    w5, wd = snap.mar_willr.get("5m"), snap.mar_willr.get("1d")
+    if (
+        daily_bearish
+        and w5 is not None
+        and wd is not None
+        and w5 < -90.0
+        and wd < -90.0
+        and snap.mar_pivot is not None
+        and snap.df_5m is not None
+        and len(snap.df_5m) > 0
+        and snap.mar_vol_spike_5m
+    ):
+        row = snap.df_5m.iloc[-1]
+        cl = float(row["close"])
+        piv = snap.mar_pivot
+        if _30_mar_near_pivot_support(cl, piv) or _30_mar_rejection_candle(row, piv):
+            return (
+                "LONG",
+                "30_MAR counter LONG: W%R<-90 (5m+1d), pivot support, vol spike",
+                tpm_c,
+                slm_c,
+            )
+
+    return None, "30_MAR: no confluence setup", None, None
+
+
 def _pivot_classic(prev: pd.Series) -> dict[str, float]:
     h, l, c = float(prev["high"]), float(prev["low"]), float(prev["close"])
     pp = (h + l + c) / 3.0
@@ -624,6 +849,12 @@ class TASnapshot:
     label_5m: str  # _tf_label(score_5m) string e.g. Buy, Neutral
     df_5m: pd.DataFrame | None
     htf_scores: dict[str, float] = field(default_factory=dict)  # 15m / 1h TF scores for entry filters
+    mtf_30mar: dict[str, float] = field(default_factory=dict)
+    mar_rsi: dict[str, float | None] = field(default_factory=dict)
+    mar_willr: dict[str, float | None] = field(default_factory=dict)
+    mar_adx_daily: float | None = None
+    mar_pivot: dict[str, float] | None = None
+    mar_vol_spike_5m: bool = False
 
 
 def build_snapshot(symbol: str, limit: int) -> TASnapshot:
@@ -748,6 +979,30 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             elif strong_sell >= 2 or sellish >= thr:
                 signal_banner = "📌 TA SIGNAL: BEARISH (multi-TF alignment)"
 
+    mtf_30mar: dict[str, float] = {}
+    mar_rsi: dict[str, float | None] = {}
+    mar_willr: dict[str, float | None] = {}
+    mar_adx_daily: float | None = None
+    mar_pivot: dict[str, float] | None = None
+    mar_vol_spike_5m = False
+    if _strategy_30_mar_enabled() and df_5m is not None:
+        try:
+            mtf_30mar, mar_rsi, mar_willr, mar_adx_daily, mar_pivot, mar_vol_spike_5m = _fetch_mtf_bundle_30_mar(
+                client, symbol, limit, score_5m, df_5m
+            )
+            lines.append("")
+            parts = [f"{k}={mtf_30mar[k]:+.2f}" for k in sorted(mtf_30mar.keys())]
+            cscore = sum(1 for k in ("5m", "15m", "30m", "1h", "1d") if k in mtf_30mar and mtf_30mar[k] <= -2.0)
+            cscore_b = sum(1 for k in ("5m", "15m", "30m", "1h", "1d") if k in mtf_30mar and mtf_30mar[k] >= 2.0)
+            adx_txt = f" ADX1d={mar_adx_daily:.1f}" if mar_adx_daily is not None else ""
+            lines.append(
+                f"── 30_MAR MTF ──  bear≤-2: {cscore} TF | bull≥+2: {cscore_b} TF{adx_txt}"
+            )
+            lines.append("  " + " | ".join(parts))
+        except Exception as e:
+            lines.append("")
+            lines.append(f"── 30_MAR MTF ── (fetch error: {e})")
+
     return TASnapshot(
         text="\n".join(lines),
         banner=signal_banner,
@@ -760,6 +1015,12 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         label_5m=label_5m,
         df_5m=df_5m,
         htf_scores=htf_scores,
+        mtf_30mar=mtf_30mar,
+        mar_rsi=mar_rsi,
+        mar_willr=mar_willr,
+        mar_adx_daily=mar_adx_daily,
+        mar_pivot=mar_pivot,
+        mar_vol_spike_5m=mar_vol_spike_5m,
     )
 
 
@@ -1005,12 +1266,15 @@ def _fixed_tp_sl_levels(
     sl_pct: float,
     lev: float,
     atr_5m: float | None,
+    *,
+    tp_atr_mult: float | None = None,
+    sl_atr_mult: float | None = None,
 ) -> tuple[float, float, str]:
     """Returns (tp_price, sl_price, mode_label). mode: atr | margin | underlying."""
     use_atr = os.environ.get("TA_TP_SL_USE_ATR", "0").strip().lower() in ("1", "true", "yes", "on")
     if use_atr and atr_5m is not None and atr_5m > 0:
-        tpm = float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
-        slm = float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
+        tpm = float(tp_atr_mult) if tp_atr_mult is not None else float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
+        slm = float(sl_atr_mult) if sl_atr_mult is not None else float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
         if side == "LONG":
             return entry + tpm * atr_5m, entry - slm * atr_5m, "atr"
         return entry - tpm * atr_5m, entry + slm * atr_5m, "atr"
@@ -1256,6 +1520,32 @@ def _decide_ta_entry(
     price_tp_pct = float(os.environ.get("TA_TP_PRICE_PCT", "6"))
     price_sl_pct = float(os.environ.get("TA_SL_PRICE_PCT", "2.5"))
     atr_sig = _atr_from_df(df)
+    if _strategy_30_mar_enabled():
+        mar_side, mar_reason, tpm_o, slm_o = _evaluate_30_mar_entry(snap)
+        if not mar_side:
+            print(f"LIVE 30_MAR skip: {mar_reason}", flush=True)
+            return None
+        side = mar_side
+        tp_price, sl_price, _mode = _fixed_tp_sl_levels(
+            side,
+            close_price,
+            price_tp_pct,
+            price_sl_pct,
+            lev,
+            atr_sig,
+            tp_atr_mult=tpm_o,
+            sl_atr_mult=slm_o,
+        )
+        print(f"LIVE 30_MAR: {mar_reason}", flush=True)
+        reverse_on = _reverse_signals_enabled()
+        if reverse_on:
+            live_gemini_zone = None
+            if tp_price > 0 and sl_price > 0:
+                side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
+            else:
+                side = _opposite_side(side)
+        return side, close_price, tp_price, sl_price, lev, None
+
     gemini_override_open_every = _gemini_override_open_every_enabled()
     use_gemini_live = _gemini_live_entries_enabled() and (not open_every or gemini_override_open_every)
     skip_ta_for_live_side = use_gemini_live and _gemini_live_no_ta_fallback_enabled()
@@ -1809,7 +2099,36 @@ def process_ta_trade_sim(
     tpm_atr = float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
     slm_atr = float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
 
-    if open_every:
+    if _strategy_30_mar_enabled():
+        mar_side, mar_reason, tpm_o, slm_o = _evaluate_30_mar_entry(snap)
+        if not mar_side:
+            print(f"TA-SIM 30_MAR skip: {mar_reason}", flush=True)
+            return
+        side = mar_side
+        tp_price, sl_price, last_fixed_mode = _fixed_tp_sl_levels(
+            side,
+            close_price,
+            price_tp_pct,
+            price_sl_pct,
+            lev,
+            atr_sig,
+            tp_atr_mult=tpm_o,
+            sl_atr_mult=slm_o,
+        )
+        if last_fixed_mode == "atr" and atr_sig is not None and tpm_o is not None and slm_o is not None:
+            tp_sl_txt = (
+                f"TP {tpm_o}×ATR / SL {slm_o}×ATR "
+                f"(ATR(14)≈{atr_sig:.4f}, {tpm_o:.1f}:{slm_o:.1f} TP:SL on price)"
+            )
+        elif last_fixed_mode == "margin":
+            tp_sl_txt = (
+                f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
+                f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
+            )
+        else:
+            tp_sl_txt = f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
+        open_extra = f"{mar_reason} | {tp_sl_txt}"
+    elif open_every:
         sc5 = snap.score_5m
         lab5 = (snap.label_5m or "").strip()
         strong_5m_only = _sf_sub("TA_OPEN_EVERY_STRONG_5M_ONLY", "0")
@@ -2004,7 +2323,10 @@ def process_ta_trade_sim(
             side = _opposite_side(side)
         open_extra = f"{open_extra} | {rev_note}" if open_extra else rev_note
 
-    ok, skip_reason = _entry_filters_pass(snap, side, df)
+    if _strategy_30_mar_enabled():
+        ok, skip_reason = True, ""
+    else:
+        ok, skip_reason = _entry_filters_pass(snap, side, df)
     if not ok:
         print(f"TA-SIM entry skipped: {skip_reason}", flush=True)
         return
@@ -2023,7 +2345,7 @@ def process_ta_trade_sim(
 
     _save_position(symbol, pos_data)
     emoji = "📈" if side == "LONG" else "📉"
-    if open_every or opened_from_banner or (use_fixed_tp_sl and not use_gemini):
+    if open_every or opened_from_banner or _strategy_30_mar_enabled() or (use_fixed_tp_sl and not use_gemini):
         if last_fixed_mode == "atr" and atr_sig is not None:
             meta = (
                 f"ATR(14)≈{atr_sig:.4f} | TP {tpm_atr}×ATR / SL {slm_atr}×ATR ({tpm_atr:.1f}:{slm_atr:.1f} TP:SL) | "
@@ -2155,6 +2477,7 @@ def main() -> int:
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim} "
         f"trade_live={trade_live} "
         f"TA_PRESET={preset_line or '(none)'} "
+        f"30_MAR={_strategy_30_mar_enabled()} "
         f"gemini_entries={_gemini_entries_env_enabled()} "
         f"gemini_for_live={_gemini_live_entries_enabled()} "
         f"gemini_override_open_every={_gemini_override_open_every_enabled()} "
@@ -2195,7 +2518,8 @@ def main() -> int:
             "🟢 eth-ta-telegram started\n"
             f"As of {now_s}\n"
             f"Symbol: {symbol} | Loop: {interval_sec}s\n"
-            f"TA_TRADE_SIM={trade_sim} | TA_REAL_TRADING={trade_live} | Gemini entries={_gemini_entries_env_enabled()} | "
+            f"TA_TRADE_SIM={trade_sim} | TA_REAL_TRADING={trade_live} | 30_MAR={_strategy_30_mar_enabled()} | "
+            f"Gemini entries={_gemini_entries_env_enabled()} | "
             f"TA_SIGNAL_FILTERS={_signal_filters_enabled()}"
             f"{reset_line}"
         )
