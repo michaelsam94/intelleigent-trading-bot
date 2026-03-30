@@ -27,6 +27,7 @@ Digest-only mode (no trades) is the default when **`TA_TRADE_SIM`** is unset or 
 - Uses **one-way** mode, sets **isolated margin**, applies `TA_LEVERAGE`.
 - Entry uses a **LIMIT** order near top-of-book (maker-biased by `TA_REAL_ENTRY_MAKER_OFFSET_BPS`). With **Gemini entry zone**, the limit is priced **inside** `entry_low`–`entry_high` (close if already in the band, else a point along the band — default **mid** via `TA_GEMINI_ZONE_LIMIT_FRAC`); fills may take longer, so the wait defaults to **`max(TA_REAL_ENTRY_TIMEOUT_SEC, TA_REAL_ENTRY_TIMEOUT_ZONE_MIN_SEC)`** (see below).
 - Tries to pre-place TP/SL close-position orders (`TA_REAL_PREPLACE_EXITS=1`), then falls back to placing them immediately after entry fill.
+- **`TA_REAL_EXIT_ORDER_MODE=limit`** (default): TP/SL are reduce-only **TAKE_PROFIT** / **STOP** limits. If they fail to fill when **mark price** crosses your levels, set **`TA_REAL_EXIT_WATCHDOG=1`** (default **on**): after an entry **fill**, a **background thread** polls mark price every **`TA_REAL_EXIT_WATCHDOG_POLL_SEC`** and, if TP or SL is breached while a position remains open, **cancels open orders** on the symbol and sends a **MARKET reduce-only** close. Does **not** start when **`TA_REAL_ENTRY_WAIT_FOR_FILL=0`** (no in-process fill). Disable with **`TA_REAL_EXIT_WATCHDOG=0`**.
 - **`TA_REAL_ENTRY_WAIT_FOR_FILL=0`**: submit the **GTC entry limit**, then attach **TP/SL** (if pre-place enabled) and **return without polling** — no cancel-after-timeout. Skips a new bracket while a **working non-reduce LIMIT** is already open on the symbol. **Note:** Binance may reject **reduce-only** TP/SL until the entry fills; the bot warns if attach fails.
 - Uses minimum exchange quantity for initial live test.
 
@@ -139,7 +140,7 @@ Uses **`TA_SIGNAL_ON_5M`**: **5m TA score** (default) or **mean TF score** (when
 | **`TA_GEMINI_ZONE_LIMIT_FRAC`** | **`0.5`** | When price is **outside** the Gemini entry zone, target = **`entry_low + frac × (entry_high − entry_low)`** (`0` = low, `1` = high, **`0.5`** = midpoint). Ignored when close is already between low and high. |
 | **`TA_GEMINI_SIGNAL_EVERY_DIGEST`** | **`0`** | Set to **`1`** to append a Gemini signal block (entry/TP/SL) to every digest message, even when no trade opens. |
 | **`TA_GEMINI_TIMEOUT_SEC`** | **`45`** | Gemini request timeout in seconds (per SDK attempt). |
-| **`TA_GEMINI_429_RETRIES`** | **`3`** | On HTTP 429 / quota backoff, sleep and retry up to this many extra attempts. |
+| **`TA_GEMINI_429_RETRIES`** | **`3`** | Extra retries with backoff for **429**, **503 UNAVAILABLE** / “high demand”, and similar transient errors (same counter as rate limits). |
 | **`GEMINI_MAX_OUTPUT_TOKENS`** | **`2048`** | Max tokens for the model reply (raise if JSON is cut off mid-field). |
 | **`TA_GEMINI_SKIP_LEGACY_ON_JSON_FRAGMENT`** | **`1`** | If **`1`**, do not call legacy `google.generativeai` when the new SDK already returned a `{` JSON fragment (avoids unrelated prose from a second generation). |
 | **`TA_GEMINI_PAUSE_UNTIL_FLAT`** | **`1`** | **`1`** = no Gemini API calls while a **live or TA-SIM** position is open (wait for TP/SL close). |
@@ -241,7 +242,7 @@ pm2 logs eth-ta-telegram
 | `TA_GEMINI_MASTER_PROMPT` | `0` | `1` = Master prompt schema; **`tp1` wins over `take_profit`** when both set |
 | `TA_GEMINI_SIGNAL_EVERY_DIGEST` | `0` | `1` = include Gemini signal section in each digest cycle |
 | `TA_GEMINI_TIMEOUT_SEC` | `45` | Gemini API timeout in seconds (per attempt) |
-| `TA_GEMINI_429_RETRIES` | `3` | Retries after rate limit / 429 with server-suggested backoff |
+| `TA_GEMINI_429_RETRIES` | `3` | Retries after 429 or 503/overload (shared backoff budget) |
 | `GEMINI_MAX_OUTPUT_TOKENS` | `2048` | Increase if Gemini JSON is truncated |
 | `TA_GEMINI_SKIP_LEGACY_ON_JSON_FRAGMENT` | `1` | Skip legacy SDK when new SDK already returned partial JSON |
 | `TA_GEMINI_PAUSE_UNTIL_FLAT` | `1` | `1` = skip Gemini API while a position is open |
@@ -249,6 +250,10 @@ pm2 logs eth-ta-telegram
 | `GEMINI_API_KEY` | — | Required if Gemini enabled |
 | `GEMINI_MODEL` | `gemini-2.0-flash` | Optional model name (code default if unset) |
 | `GEMINI_MODEL_FALLBACK` | — | Optional second model (e.g. `gemini-2.0-flash`) used after **`GEMINI_MODEL`** hits free-tier **`limit: 0`**, or when both SDKs return empty/unparseable text |
+| `TA_REAL_EXIT_ORDER_MODE` | `limit` | `limit` = reduce-only TP/SL trigger orders; `market` = `TAKE_PROFIT_MARKET` / `STOP_MARKET` |
+| `TA_REAL_EXIT_WATCHDOG` | `1` | With **`limit`** exits: **`1`** = after entry fill, poll **mark** vs TP/SL; on breach + open position → cancel all + **MARKET** reduce. **`0`** = off |
+| `TA_REAL_EXIT_WATCHDOG_POLL_SEC` | `1.5` | Seconds between mark checks (clamped 0.5–60) |
+| `TA_REAL_EXIT_WATCHDOG_MAX_SEC` | `604800` | Stop watchdog thread after this many seconds (default 7d) |
 
 ## ML trading vs TA-sim
 

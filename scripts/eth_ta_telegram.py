@@ -71,6 +71,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from dataclasses import dataclass, field
@@ -1081,6 +1082,129 @@ def _futures_has_open_entry_limit(client: Client, symbol: str) -> bool:
     return False
 
 
+def _live_exit_watchdog_enabled(exit_mode: str) -> bool:
+    """Poll mark vs TP/SL; if breached while position open, cancel opens + MARKET reduce-only."""
+    if (exit_mode or "limit").strip().lower() != "limit":
+        return False
+    return _sf_sub("TA_REAL_EXIT_WATCHDOG", "1")
+
+
+def _futures_mark_price(client: Client, fut_symbol: str) -> float | None:
+    try:
+        mp = client.futures_mark_price(symbol=fut_symbol)
+        if isinstance(mp, list):
+            if not mp:
+                return None
+            mp = mp[0]
+        return float(mp.get("markPrice", 0) or 0)
+    except Exception:
+        return None
+
+
+def _run_live_exit_watchdog(
+    fut_symbol: str,
+    side: str,
+    tp_stop: float,
+    sl_stop: float,
+    step: float,
+    token: str,
+) -> None:
+    poll = float(os.environ.get("TA_REAL_EXIT_WATCHDOG_POLL_SEC", "1.5") or 1.5)
+    poll = max(0.5, min(poll, 60.0))
+    max_sec = float(os.environ.get("TA_REAL_EXIT_WATCHDOG_MAX_SEC", "604800") or 604800)
+    deadline = time.time() + max(60.0, max_sec)
+    s = (side or "").strip().upper()
+    print(
+        f"LIVE exit watchdog started for {fut_symbol} ({s}) TP={tp_stop:,.2f} SL={sl_stop:,.2f} poll={poll}s",
+        flush=True,
+    )
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            client = _client()
+            pos = _futures_position_amt(client, fut_symbol)
+            if abs(pos) <= 1e-12:
+                print(f"LIVE exit watchdog {fut_symbol}: flat, exit thread", flush=True)
+                return
+            mark = _futures_mark_price(client, fut_symbol)
+            if mark is None or mark <= 0:
+                continue
+        except Exception as e:
+            print(f"LIVE exit watchdog poll error: {e}", flush=True)
+            continue
+
+        breach: str | None = None
+        if s == "LONG":
+            if mark >= tp_stop:
+                breach = "TP"
+            elif mark <= sl_stop:
+                breach = "SL"
+        elif s == "SHORT":
+            if mark <= tp_stop:
+                breach = "TP"
+            elif mark >= sl_stop:
+                breach = "SL"
+        if breach is None:
+            continue
+
+        try:
+            client = _client()
+            try:
+                client.futures_cancel_all_open_orders(symbol=fut_symbol)
+            except Exception:
+                pass
+            time.sleep(0.3)
+            pos = _futures_position_amt(client, fut_symbol)
+            if abs(pos) <= 1e-12:
+                print(
+                    f"LIVE exit watchdog: position already flat after {breach} breach @ mark {mark:,.2f}",
+                    flush=True,
+                )
+                return
+            exit_side = "SELL" if pos > 0 else "BUY"
+            q = _round_to_step(abs(pos), step, up=False)
+            if q <= 0:
+                return
+            client.futures_create_order(
+                symbol=fut_symbol,
+                side=exit_side,
+                type="MARKET",
+                quantity=q,
+                reduceOnly=True,
+            )
+            msg = (
+                f"🛡️ LIVE exit watchdog: {breach} breached (mark {mark:,.2f} vs "
+                f"TP {tp_stop:,.2f} / SL {sl_stop:,.2f}). "
+                f"Canceled open orders + MARKET reduce {q} {fut_symbol}."
+            )
+            print(msg, flush=True)
+            if token and recipient_chat_ids({}):
+                broadcast_telegram_plain(token, msg, {})
+        except Exception as e:
+            err = f"LIVE exit watchdog MARKET close failed ({breach}): {e}"
+            print(err, flush=True)
+            if token and recipient_chat_ids({}):
+                broadcast_telegram_plain(token, err, {})
+        return
+
+
+def _spawn_live_exit_watchdog(
+    fut_symbol: str,
+    side: str,
+    tp_stop: float,
+    sl_stop: float,
+    step: float,
+    token: str,
+) -> None:
+    t = threading.Thread(
+        target=_run_live_exit_watchdog,
+        args=(fut_symbol, side, tp_stop, sl_stop, step, token),
+        name=f"ta-live-exit-watchdog-{fut_symbol}",
+        daemon=True,
+    )
+    t.start()
+
+
 def _futures_setup(client: Client, symbol: str, lev: int, isolated: bool = True) -> None:
     try:
         client.futures_change_position_mode(dualSidePosition="false")
@@ -1516,6 +1640,10 @@ def process_ta_trade_live_futures(
         f"Entry fill: {avg_fill:,.2f}\n"
         f"TP/SL mode: {exit_mode.upper()} | TP: {tp_price:,.2f} | SL: {sl_price:,.2f}"
     )
+    tp_w = _round_to_step(tp_price, tick, up=(side == "LONG"))
+    sl_w = _round_to_step(sl_price, tick, up=(side == "LONG"))
+    if _live_exit_watchdog_enabled(exit_mode):
+        _spawn_live_exit_watchdog(fut_symbol, side, tp_w, sl_w, step, token)
 
 
 def process_ta_trade_sim(

@@ -48,6 +48,26 @@ def _is_rate_limit_error(err: BaseException) -> bool:
     return "429" in s or "resource_exhausted" in s or ("quota" in s and "exceed" in s)
 
 
+def _is_transient_server_error(err: BaseException) -> bool:
+    """503 / model overload — retry with backoff instead of immediately calling legacy SDK."""
+    s = str(err).lower()
+    return (
+        "503" in s
+        or "unavailable" in s
+        or "high demand" in s
+        or "overloaded" in s
+        or "try again later" in s
+    )
+
+
+def _gemini_error_should_retry(err: BaseException) -> bool:
+    if _is_transient_server_error(err):
+        return True
+    if _is_rate_limit_error(err) and not _quota_limit_zero(err):
+        return True
+    return False
+
+
 def _quota_limit_zero(err: BaseException) -> bool:
     """True when Google reports free-tier quota exhausted (limit: 0) for the model."""
     return bool(re.search(r"limit:\s*0\b", str(err)))
@@ -445,7 +465,7 @@ def gemini_trade_decision(
                     return t
             except Exception as e:
                 if extra:
-                    if _is_rate_limit_error(e):
+                    if _is_rate_limit_error(e) or _is_transient_server_error(e):
                         raise
                     print(f"Gemini new SDK (JSON mode): {e!s} — retrying without response_mime_type", flush=True)
                     continue
@@ -473,7 +493,7 @@ def gemini_trade_decision(
         try:
             resp = model.generate_content(full_user_prompt, generation_config=gen_cfg)
         except Exception as e:
-            if _is_rate_limit_error(e):
+            if _is_rate_limit_error(e) or _is_transient_server_error(e):
                 raise
             gen_cfg.pop("response_mime_type", None)
             resp = model.generate_content(full_user_prompt, generation_config=gen_cfg)
@@ -490,10 +510,13 @@ def gemini_trade_decision(
         tn = text_new.strip()
         return tn.startswith("{") and '"action"' in tn and len(tn) > 20
 
-    def _sleep_for_429(err: BaseException) -> None:
+    def _sleep_for_gemini_retry(err: BaseException) -> None:
         delay = _retry_delay_seconds_from_error(err)
         wait_s = min((delay or 40.0) + 2.0, 120.0)
-        print(f"Gemini rate limit — sleeping {wait_s:.0f}s before retry", flush=True)
+        if _is_transient_server_error(err) and not _is_rate_limit_error(err):
+            print(f"Gemini server busy (503/overload) — sleeping {wait_s:.0f}s before retry", flush=True)
+        else:
+            print(f"Gemini rate limit — sleeping {wait_s:.0f}s before retry", flush=True)
         time.sleep(wait_s)
 
     for model_name in model_names:
@@ -505,17 +528,16 @@ def gemini_trade_decision(
             try:
                 text_new = _run_with_timeout(lambda mn=model_name: _call_new_sdk_once(mn))
             except Exception as e:
-                if _is_rate_limit_error(e):
-                    if _quota_limit_zero(e):
-                        print(
-                            f"Gemini: free-tier quota exhausted for {model_name} (limit: 0). "
-                            "Set GEMINI_MODEL_FALLBACK (e.g. gemini-2.0-flash) or enable billing.",
-                            flush=True,
-                        )
-                        break
-                    if attempt < max_429_retries:
-                        _sleep_for_429(e)
-                        continue
+                if _is_rate_limit_error(e) and _quota_limit_zero(e):
+                    print(
+                        f"Gemini: free-tier quota exhausted for {model_name} (limit: 0). "
+                        "Set GEMINI_MODEL_FALLBACK (e.g. gemini-2.0-flash) or enable billing.",
+                        flush=True,
+                    )
+                    break
+                if _gemini_error_should_retry(e) and attempt < max_429_retries:
+                    _sleep_for_gemini_retry(e)
+                    continue
                 print(f"Gemini new SDK error: {e} — trying legacy SDK", flush=True)
 
             if text_new:
@@ -536,17 +558,16 @@ def gemini_trade_decision(
             try:
                 text_old = _run_with_timeout(lambda mn=model_name: _call_old_sdk_once(mn))
             except Exception as e:
-                if _is_rate_limit_error(e):
-                    if _quota_limit_zero(e):
-                        print(
-                            f"Gemini: free-tier quota exhausted for {model_name} (limit: 0). "
-                            "Set GEMINI_MODEL_FALLBACK (e.g. gemini-2.0-flash) or enable billing.",
-                            flush=True,
-                        )
-                        break
-                    if attempt < max_429_retries:
-                        _sleep_for_429(e)
-                        continue
+                if _is_rate_limit_error(e) and _quota_limit_zero(e):
+                    print(
+                        f"Gemini: free-tier quota exhausted for {model_name} (limit: 0). "
+                        "Set GEMINI_MODEL_FALLBACK (e.g. gemini-2.0-flash) or enable billing.",
+                        flush=True,
+                    )
+                    break
+                if _gemini_error_should_retry(e) and attempt < max_429_retries:
+                    _sleep_for_gemini_retry(e)
+                    continue
                 raise RuntimeError(f"Gemini API error: {e}") from e
 
             if text_old:
