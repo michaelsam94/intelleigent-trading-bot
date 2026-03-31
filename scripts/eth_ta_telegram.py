@@ -501,6 +501,7 @@ def _analyze_ohlcv(df: pd.DataFrame) -> tuple[float, dict[str, str]]:
     close = df["close"].values.astype(float)
     high = df["high"].values.astype(float)
     low = df["low"].values.astype(float)
+    volume = df["volume"].values.astype(float) if "volume" in df.columns else None
     n = len(close)
     details: dict[str, str] = {}
     if n < 60:
@@ -535,6 +536,8 @@ def _analyze_ohlcv(df: pd.DataFrame) -> tuple[float, dict[str, str]]:
 
     macd, macd_signal, macd_hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
     h = _last(macd_hist)
+    mv = _last(macd)
+    sv = _last(macd_signal)
     if h is not None:
         if h > 0:
             score += 0.5
@@ -544,6 +547,16 @@ def _analyze_ohlcv(df: pd.DataFrame) -> tuple[float, dict[str, str]]:
             details["MACD"] = "Sell"
         else:
             details["MACD"] = "Neutral"
+    # MACD line cross of signal (extra confirmation)
+    if mv is not None and sv is not None and len(macd_hist) >= 3:
+        prev_h = macd_hist[-2] if not np.isnan(macd_hist[-2]) else None
+        if prev_h is not None and h is not None:
+            if prev_h < 0 < h:
+                score += 0.4
+                details["MACD_cross"] = "Bullish cross (histogram turned positive)"
+            elif prev_h > 0 > h:
+                score -= 0.4
+                details["MACD_cross"] = "Bearish cross (histogram turned negative)"
 
     slowk, slowd = talib.STOCH(high, low, close, fastk_period=5, slowk_period=3, slowd_period=3)
     sk = _last(slowk)
@@ -601,7 +614,337 @@ def _analyze_ohlcv(df: pd.DataFrame) -> tuple[float, dict[str, str]]:
         else:
             details["WilliamsR"] = f"{willr:.1f} Neutral"
 
+    # Bollinger Bands
+    if n >= 20:
+        upper, mid, lower = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2)
+        u = _last(upper)
+        l = _last(lower)
+        m = _last(mid)
+        if u is not None and l is not None and m is not None and (u - l) > 0:
+            pct_b = (c - l) / (u - l)
+            if pct_b < 0.05:
+                score += 0.5
+                details["BB"] = f"%B={pct_b:.2f} Near lower band (oversold)"
+            elif pct_b > 0.95:
+                score -= 0.5
+                details["BB"] = f"%B={pct_b:.2f} Near upper band (overbought)"
+            elif pct_b < 0.2:
+                score += 0.25
+                details["BB"] = f"%B={pct_b:.2f} Below mid (mild bullish)"
+            elif pct_b > 0.8:
+                score -= 0.25
+                details["BB"] = f"%B={pct_b:.2f} Above mid (mild bearish)"
+            else:
+                details["BB"] = f"%B={pct_b:.2f} Mid range"
+
+    # StochRSI
+    if n >= 30:
+        try:
+            fastk, fastd = talib.STOCHRSI(close, timeperiod=14, fastk_period=5, fastd_period=3)
+            srsi_k = _last(fastk)
+            srsi_d = _last(fastd)
+            if srsi_k is not None:
+                if srsi_k < 20:
+                    score += 0.35
+                    details["StochRSI"] = f"K={srsi_k:.1f} Oversold"
+                elif srsi_k > 80:
+                    score -= 0.35
+                    details["StochRSI"] = f"K={srsi_k:.1f} Overbought"
+                else:
+                    details["StochRSI"] = f"K={srsi_k:.1f} Neutral"
+        except Exception:
+            pass
+
+    # Ichimoku (simplified — Tenkan vs Kijun)
+    if n >= 52:
+        tenkan = (np.max(high[-9:]) + np.min(low[-9:])) / 2.0
+        kijun = (np.max(high[-26:]) + np.min(low[-26:])) / 2.0
+        senkou_a = (tenkan + kijun) / 2.0
+        senkou_b = (np.max(high[-52:]) + np.min(low[-52:])) / 2.0
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bot = min(senkou_a, senkou_b)
+        ichi_sc = 0.0
+        ichi_notes = []
+        if tenkan > kijun:
+            ichi_sc += 0.3
+            ichi_notes.append("Tenkan>Kijun")
+        elif tenkan < kijun:
+            ichi_sc -= 0.3
+            ichi_notes.append("Tenkan<Kijun")
+        if c > cloud_top:
+            ichi_sc += 0.4
+            ichi_notes.append("above cloud")
+        elif c < cloud_bot:
+            ichi_sc -= 0.4
+            ichi_notes.append("below cloud")
+        else:
+            ichi_notes.append("in cloud")
+        score += ichi_sc
+        details["Ichimoku"] = f"{', '.join(ichi_notes)} (score {ichi_sc:+.2f})"
+
+    # Volume momentum
+    if volume is not None and len(volume) >= 20 and float(np.mean(volume[-20:])) > 0:
+        vol_ratio = float(volume[-1]) / float(np.mean(volume[-20:]))
+        if vol_ratio > 1.5:
+            body = abs(c - float(close[-2])) if len(close) >= 2 else 0.0
+            if body > 0 and c > float(close[-2]):
+                score += 0.35
+                details["Volume"] = f"×{vol_ratio:.2f} surge on UP move (bullish)"
+            elif body > 0 and c < float(close[-2]):
+                score -= 0.35
+                details["Volume"] = f"×{vol_ratio:.2f} surge on DOWN move (bearish)"
+            else:
+                details["Volume"] = f"×{vol_ratio:.2f} surge (neutral direction)"
+        else:
+            details["Volume"] = f"×{vol_ratio:.2f} normal"
+
     return score, details
+
+
+def _detect_divergence(df: pd.DataFrame, lookback: int = 14) -> tuple[int, int, str]:
+    """
+    Detect bullish/bearish RSI and MACD divergence over `lookback` bars.
+    Returns (rsi_div, macd_div, notes) where each is: +1=bullish, -1=bearish, 0=none.
+    """
+    close = df["close"].values.astype(float)
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    n = len(close)
+    if n < lookback + 30:
+        return 0, 0, ""
+
+    rsi_arr = talib.RSI(close, timeperiod=14)
+    _, _, macd_hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+
+    rsi_div, macd_div = 0, 0
+    notes = []
+
+    c_win = close[-lookback:]
+    l_win = low[-lookback:]
+    rsi_win = rsi_arr[-lookback:]
+    hist_win = macd_hist[-lookback:]
+
+    valid_rsi = ~np.isnan(rsi_win)
+    valid_hist = ~np.isnan(hist_win)
+
+    if valid_rsi.sum() >= 4 and valid_hist.sum() >= 4:
+        price_lo_idx = int(np.argmin(l_win))
+        price_hi_idx = int(np.argmax(c_win))
+
+        rsi_clean = rsi_win.copy()
+        rsi_clean[~valid_rsi] = np.nan
+        hist_clean = hist_win.copy()
+        hist_clean[~valid_hist] = np.nan
+
+        # Bullish divergence: price makes new low but RSI does not
+        if price_lo_idx > 0 and valid_rsi[price_lo_idx]:
+            prev_lo_price = float(np.nanmin(l_win[:price_lo_idx]))
+            if float(l_win[price_lo_idx]) < prev_lo_price:
+                prev_rsi_at_lo = float(np.nanmin(rsi_clean[:price_lo_idx]))
+                if float(rsi_clean[price_lo_idx]) > prev_rsi_at_lo and float(rsi_clean[price_lo_idx]) < 50:
+                    rsi_div = 1
+                    notes.append("RSI bullish divergence")
+
+        # Bearish divergence: price makes new high but RSI does not
+        if price_hi_idx > 0 and valid_rsi[price_hi_idx]:
+            prev_hi_price = float(np.nanmax(c_win[:price_hi_idx]))
+            if float(c_win[price_hi_idx]) > prev_hi_price:
+                prev_rsi_at_hi = float(np.nanmax(rsi_clean[:price_hi_idx]))
+                if float(rsi_clean[price_hi_idx]) < prev_rsi_at_hi and float(rsi_clean[price_hi_idx]) > 50:
+                    rsi_div = -1
+                    notes.append("RSI bearish divergence")
+
+        # MACD histogram divergence (similar logic)
+        hist_lo_idx = int(np.nanargmin(hist_clean)) if valid_hist.any() else -1
+        if hist_lo_idx > 0 and valid_hist[hist_lo_idx]:
+            if float(l_win[hist_lo_idx]) < float(np.nanmin(l_win[:hist_lo_idx])):
+                prev_hist = float(np.nanmin(hist_clean[:hist_lo_idx]))
+                if float(hist_clean[hist_lo_idx]) > prev_hist:
+                    macd_div = 1
+                    notes.append("MACD bullish divergence")
+
+        hist_hi_idx = int(np.nanargmax(hist_clean)) if valid_hist.any() else -1
+        if hist_hi_idx > 0 and valid_hist[hist_hi_idx]:
+            if float(c_win[hist_hi_idx]) > float(np.nanmax(c_win[:hist_hi_idx])):
+                prev_hist_hi = float(np.nanmax(hist_clean[:hist_hi_idx]))
+                if float(hist_clean[hist_hi_idx]) < prev_hist_hi:
+                    macd_div = -1
+                    notes.append("MACD bearish divergence")
+
+    return rsi_div, macd_div, "; ".join(notes) if notes else "No divergence"
+
+
+def _candlestick_signal(df: pd.DataFrame) -> tuple[float, list[str]]:
+    """
+    Check key TA-Lib candlestick patterns. Returns (score, pattern_names).
+    Bullish patterns: +1 each (capped), bearish: -1 each.
+    """
+    open_ = df["open"].values.astype(float)
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    close = df["close"].values.astype(float)
+    if len(close) < 10:
+        return 0.0, []
+
+    patterns: list[tuple[str, Any, float]] = [
+        ("Hammer", talib.CDLHAMMER, 0.5),
+        ("InvHammer", talib.CDLINVERTEDHAMMER, 0.4),
+        ("BullEngulf", talib.CDLENGULFING, 0.6),
+        ("MorningStar", talib.CDLMORNINGSTAR, 0.7),
+        ("3WhiteSoldiers", talib.CDL3WHITESOLDIERS, 0.7),
+        ("PiercingLine", talib.CDLPIERCING, 0.5),
+        ("BullHarami", talib.CDLHARAMI, 0.3),
+        ("ShootingStar", talib.CDLSHOOTINGSTAR, -0.5),
+        ("BearEngulf", talib.CDLENGULFING, -0.6),
+        ("EveningStar", talib.CDLEVENINGSTAR, -0.7),
+        ("3BlackCrows", talib.CDL3BLACKCROWS, -0.7),
+        ("DarkCloud", talib.CDLDARKCLOUDCOVER, -0.5),
+        ("Doji", talib.CDLDOJI, 0.0),
+    ]
+
+    found: list[str] = []
+    total_score = 0.0
+    for name, fn, weight in patterns:
+        try:
+            result = fn(open_, high, low, close)
+            last_val = int(result[-1]) if result is not None and len(result) > 0 else 0
+            if last_val > 0 and weight > 0:
+                found.append(f"+{name}")
+                total_score += weight
+            elif last_val < 0 and weight < 0:
+                found.append(f"-{name}")
+                total_score += weight
+            elif last_val != 0 and name == "Doji":
+                found.append("Doji")
+        except Exception:
+            continue
+
+    return float(np.clip(total_score, -1.5, 1.5)), found
+
+
+def _supertrend_signal(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> int:
+    """
+    Compute Supertrend direction on last bar. Returns +1 (bullish), -1 (bearish), 0 (insufficient data).
+    """
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    close = df["close"].values.astype(float)
+    n = len(close)
+    if n < period + 5:
+        return 0
+    atr_arr = talib.ATR(high, low, close, timeperiod=period)
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr_arr
+    lower_band = hl2 - multiplier * atr_arr
+    supertrend = np.full(n, np.nan)
+    direction = np.zeros(n, dtype=int)
+    for i in range(period, n):
+        if np.isnan(atr_arr[i]):
+            continue
+        ub = upper_band[i]
+        lb = lower_band[i]
+        if i > period:
+            prev_ub = supertrend[i - 1] if direction[i - 1] == -1 else upper_band[i - 1]
+            prev_lb = supertrend[i - 1] if direction[i - 1] == 1 else lower_band[i - 1]
+            lb = max(lb, prev_lb) if close[i - 1] >= prev_lb else lb
+            ub = min(ub, prev_ub) if close[i - 1] <= prev_ub else ub
+        if i == period or np.isnan(supertrend[i - 1]):
+            direction[i] = 1 if close[i] >= lb else -1
+        else:
+            if direction[i - 1] == 1:
+                direction[i] = 1 if close[i] >= lb else -1
+            else:
+                direction[i] = -1 if close[i] <= ub else 1
+        supertrend[i] = lb if direction[i] == 1 else ub
+    return int(direction[-1]) if n > period else 0
+
+
+@dataclass
+class PrecisionSignal:
+    action: str          # "LONG", "SHORT", "HOLD"
+    confidence: int      # 0-100
+    score: float         # raw weighted score
+    reasons: list[str]
+    divergence_note: str
+    patterns: list[str]
+    supertrend: int      # +1/-1/0
+
+
+def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
+    """
+    Aggregates all indicator signals on 5m data into a single high-accuracy signal with confidence.
+    Weights: core TA score (normalized) 40%, candlestick 15%, divergence 20%, supertrend 15%, volume 10%.
+    """
+    if df_5m is None or len(df_5m) < 60:
+        return PrecisionSignal("HOLD", 0, 0.0, ["Insufficient data"], "", [], 0)
+
+    reasons: list[str] = []
+
+    # 1. Core TA score (normalized to -1..+1)
+    ta_score, _ = _analyze_ohlcv(df_5m)
+    ta_norm = float(np.clip(ta_score / 4.0, -1.0, 1.0))
+    weighted_score = ta_norm * 0.40
+
+    # 2. Candlestick patterns
+    candle_score, patterns = _candlestick_signal(df_5m)
+    candle_norm = float(np.clip(candle_score / 1.5, -1.0, 1.0))
+    weighted_score += candle_norm * 0.15
+    if patterns:
+        reasons.append(f"Patterns: {', '.join(patterns)}")
+
+    # 3. Divergence
+    rsi_div, macd_div, div_note = _detect_divergence(df_5m)
+    div_score = float(np.clip((rsi_div + macd_div) / 2.0, -1.0, 1.0))
+    weighted_score += div_score * 0.20
+    if rsi_div != 0 or macd_div != 0:
+        reasons.append(div_note)
+
+    # 4. Supertrend
+    st_dir = _supertrend_signal(df_5m)
+    weighted_score += float(st_dir) * 0.15
+    if st_dir == 1:
+        reasons.append("Supertrend: bullish")
+    elif st_dir == -1:
+        reasons.append("Supertrend: bearish")
+
+    # 5. Volume momentum (from raw data)
+    vol_contrib = 0.0
+    if "volume" in df_5m.columns and len(df_5m) >= 20:
+        vol = df_5m["volume"].values.astype(float)
+        close_v = df_5m["close"].values.astype(float)
+        avg_vol = float(np.mean(vol[-20:]))
+        if avg_vol > 0:
+            ratio = float(vol[-1]) / avg_vol
+            if ratio > 1.5 and len(close_v) >= 2:
+                direction = 1.0 if close_v[-1] > close_v[-2] else -1.0
+                vol_contrib = direction * min(ratio / 3.0, 1.0)
+                reasons.append(f"Volume surge ×{ratio:.2f} {'↑' if direction > 0 else '↓'}")
+    weighted_score += vol_contrib * 0.10
+
+    # Map to action + confidence
+    final = float(np.clip(weighted_score, -1.0, 1.0))
+    confidence = int(abs(final) * 100)
+
+    if final >= 0.25:
+        action = "LONG"
+        reasons.insert(0, f"TA score {ta_score:+.2f} → {_tf_label(ta_score)}")
+    elif final <= -0.25:
+        action = "SHORT"
+        reasons.insert(0, f"TA score {ta_score:+.2f} → {_tf_label(ta_score)}")
+    else:
+        action = "HOLD"
+        reasons.insert(0, f"TA score {ta_score:+.2f} → No clear edge")
+        confidence = max(0, 25 - confidence)
+
+    return PrecisionSignal(
+        action=action,
+        confidence=confidence,
+        score=final,
+        reasons=reasons,
+        divergence_note=div_note,
+        patterns=patterns,
+        supertrend=st_dir,
+    )
 
 
 def _adx_macd_from_df(df: pd.DataFrame) -> tuple[float | None, float | None]:
@@ -855,6 +1198,7 @@ class TASnapshot:
     mar_adx_daily: float | None = None
     mar_pivot: dict[str, float] | None = None
     mar_vol_spike_5m: bool = False
+    precision: PrecisionSignal | None = None
 
 
 def build_snapshot(symbol: str, limit: int) -> TASnapshot:
@@ -1003,8 +1347,32 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             lines.append("")
             lines.append(f"── 30_MAR MTF ── (fetch error: {e})")
 
+    # Compute precision signal from 5m data and prepend to digest
+    precision: PrecisionSignal | None = None
+    precision_header_lines: list[str] = []
+    try:
+        precision = _compute_precision_signal(df_5m)
+        action_emoji = {"LONG": "🟢", "SHORT": "🔴", "HOLD": "🟡"}.get(precision.action, "⚪")
+        bar = "█" * (precision.confidence // 10) + "░" * (10 - precision.confidence // 10)
+        precision_header_lines.append(
+            f"⚡ PRECISION SIGNAL: {action_emoji} {precision.action}  |  Confidence: {precision.confidence}%  [{bar}]"
+        )
+        if precision.reasons:
+            precision_header_lines.append("Basis: " + " · ".join(precision.reasons))
+        if precision.patterns:
+            pass  # already in reasons
+        if precision.divergence_note and precision.divergence_note != "No divergence":
+            precision_header_lines.append(f"Divergence: {precision.divergence_note}")
+        st_txt = {1: "↑ Bullish", -1: "↓ Bearish", 0: "—"}.get(precision.supertrend, "—")
+        precision_header_lines.append(f"Supertrend: {st_txt}  |  Raw score: {precision.score:+.3f}")
+        precision_header_lines.append("─" * 40)
+    except Exception as e:
+        precision_header_lines.append(f"⚡ Precision signal: (error: {e})")
+
+    final_lines = precision_header_lines + [""] + lines
+
     return TASnapshot(
-        text="\n".join(lines),
+        text="\n".join(final_lines),
         banner=signal_banner,
         tf_scores=tf_scores,
         tf_labels=tf_labels,
@@ -1021,6 +1389,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         mar_adx_daily=mar_adx_daily,
         mar_pivot=mar_pivot,
         mar_vol_spike_5m=mar_vol_spike_5m,
+        precision=precision,
     )
 
 

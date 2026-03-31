@@ -54,6 +54,46 @@ Config files are in `configs/`. Available examples:
 ## System Dependencies
 - `ta-lib` (Nix system package) - Required for the ta-lib Python wrapper
 
+## eth_ta_telegram — Precision Signal (5-min TA Digest)
+
+`scripts/eth_ta_telegram.py` runs a TA digest every 5 minutes (configurable via `TA_INTERVAL_SEC`) and sends it to Telegram.
+
+### Enhanced Precision Signal (recent update)
+Each digest now leads with a **⚡ PRECISION SIGNAL** block that aggregates multiple high-accuracy indicator layers:
+
+| Layer | Weight | Indicators |
+|---|---|---|
+| Core TA score | 40% | MA, RSI, MACD + cross, Stochastic, ADX/DI, CCI, Williams %R, **Bollinger Bands**, **StochRSI**, **Ichimoku**, **Volume momentum** |
+| Divergence | 20% | RSI bullish/bearish divergence, MACD histogram divergence |
+| Supertrend | 15% | Supertrend (period=10, mult=3) direction |
+| Candlestick | 15% | Hammer, Engulfing, Morning/Evening Star, 3 Soldiers/Crows, Shooting Star, Piercing, Dark Cloud, Doji |
+| Volume momentum | 10% | Volume surge × direction confirmation |
+
+Output at the top of every Telegram message:
+```
+⚡ PRECISION SIGNAL: 🟢 LONG  |  Confidence: 72%  [███████░░░]
+Basis: TA score +2.45 → Buy · RSI bullish divergence · Supertrend: bullish · Volume surge ×2.1 ↑
+Supertrend: ↑ Bullish  |  Raw score: +0.361
+────────────────────────────────────────
+```
+
+### Running eth_ta_telegram
+```bash
+# Minimum — Telegram digest only (no paper trading)
+TA_SYMBOL=ETHUSDC TELEGRAM_BOT_TOKEN=<token> TELEGRAM_CHAT_ID=<chat_id> python3 scripts/eth_ta_telegram.py
+
+# With paper trading enabled
+TA_SYMBOL=ETHUSDC TA_TRADE_SIM=1 TELEGRAM_BOT_TOKEN=<token> TELEGRAM_CHAT_ID=<chat_id> python3 scripts/eth_ta_telegram.py
+
+# Key environment variables
+TA_SYMBOL=ETHUSDC          # symbol (default: ETHUSDC)
+TA_INTERVAL_SEC=300        # 5 minutes (default: 300)
+TA_KLINES_LIMIT=500        # candles fetched per timeframe
+TA_SIGNAL_FILTERS=1        # strict entry gates (ADX + MACD + HTF trend)
+TA_PRESET=high-win-rate    # preset tuning bundle (default on)
+GEMINI_API_KEY=...         # optional — enables Gemini AI signal layer
+```
+
 ## Execution Workflow (Typical Usage)
 1. Download historical data: `python3 -m scripts.download`
 2. Merge data: `python3 -m scripts.merge`
