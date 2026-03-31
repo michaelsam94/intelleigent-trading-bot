@@ -34,3 +34,19 @@ hmmlearn  # HMM regime (generator regime_hmm)
 optuna  # Hyperparameter tuning (scripts/optuna_tune.py)
 
 # seaborn  # if outputs with diagrams are used
+apscheduler
+click
+google-genai
+google-generativeai
+lightgbm
+numba
+numpy
+pandas
+pyarrow
+python-binance
+requests
+scikit-learn
+ta-lib
+tqdm
+websockets
+xgboost
