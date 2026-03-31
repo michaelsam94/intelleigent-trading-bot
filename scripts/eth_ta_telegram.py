@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Multi-timeframe technical analysis digest for ETH (or any Binance spot symbol), sent to Telegram every N seconds.
+Multi-timeframe technical analysis digest for ETH (Binance spot or USD-M perpetual OHLCV via TA_USE_FUTURES_KLINES), sent to Telegram every N seconds.
 
 Optional TA-driven **paper trading** (isolated state under data/ta_sim/<SYMBOL>/): $10 start, 20x leverage,
 ATR TP/SL and same fee model as outputs/notifier_trades trader_simulation.
 
 Env (digest):
   TA_SYMBOL=ETHUSDC
+  TA_FUTURES_SYMBOL=ETHUSDC   # used for futures_klines when TA_USE_FUTURES_KLINES=1 (defaults to TA_SYMBOL)
+  TA_USE_FUTURES_KLINES=      # unset = ON when TA_REAL_TRADING=1; 1/0 = force futures / spot klines
   TA_INTERVAL_SEC=300
   TA_KLINES_LIMIT=500
   TA_SIGNAL_ALERTS=1
@@ -281,6 +283,32 @@ def _ta_real_trading_enabled() -> bool:
     if os.environ.get("TA_REAL_TRADING", "0").strip().lower() not in ("1", "true", "yes", "on"):
         return False
     return os.environ.get("TA_REAL_CONFIRM", "").strip().upper() == "I_UNDERSTAND"
+
+
+def _ta_futures_klines_enabled() -> bool:
+    """
+    Use Binance USD-M futures_klines (perpetual) instead of spot get_klines for all TA OHLCV.
+    When TA_USE_FUTURES_KLINES is unset, defaults ON if live futures trading is enabled so digest matches execution venue.
+    """
+    raw = (os.environ.get("TA_USE_FUTURES_KLINES") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return _ta_real_trading_enabled()
+
+
+def _ta_digest_symbol() -> str:
+    """Symbol for klines + digest header. Futures klines use TA_FUTURES_SYMBOL (default TA_SYMBOL)."""
+    if _ta_futures_klines_enabled():
+        return os.environ.get("TA_FUTURES_SYMBOL", os.environ.get("TA_SYMBOL", "ETHUSDC")).strip().upper()
+    return os.environ.get("TA_SYMBOL", "ETHUSDC").strip().upper()
+
+
+def _fetch_klines(client: Client, symbol: str, interval: str, limit: int) -> list:
+    if _ta_futures_klines_enabled():
+        return client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+    return client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
 
 def _suppress_trade_sim_digest_hint() -> bool:
@@ -1057,7 +1085,7 @@ def _fetch_mtf_bundle_30_mar(
 
     for interval in ("15m", "30m", "1h", "1w"):
         try:
-            kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+            kl = _fetch_klines(client, symbol, interval, limit)
             if not kl or len(kl) < 60:
                 continue
             dfx = _klines_to_df(kl)
@@ -1070,7 +1098,7 @@ def _fetch_mtf_bundle_30_mar(
             continue
 
     try:
-        kl_d = client.get_klines(symbol=symbol, interval="1d", limit=max(limit, 120))
+        kl_d = _fetch_klines(client, symbol, "1d", max(limit, 120))
         if kl_d and len(kl_d) >= 60:
             df_d = _klines_to_df(kl_d)
             sc_d, _ = _analyze_ohlcv(df_d)
@@ -1276,7 +1304,8 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     )
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines.append(f"📊 TA digest — {symbol} (Binance spot)")
+    _src = "Binance USD-M futures" if _ta_futures_klines_enabled() else "Binance spot"
+    lines.append(f"📊 TA digest — {symbol} ({_src})")
     lines.append(f"As of {now}")
     lines.append("")
 
@@ -1286,7 +1315,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
 
     for interval, label in frames:
         try:
-            kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+            kl = _fetch_klines(client, symbol, interval, limit)
         except BinanceAPIException as e:
             lines.append(f"{label}: (error: {e})")
             continue
@@ -1309,7 +1338,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
 
     if not digest_5m_only:
         try:
-            kl_d = client.get_klines(symbol=symbol, interval="1d", limit=5)
+            kl_d = _fetch_klines(client, symbol, "1d", 5)
             if len(kl_d) >= 2:
                 ddf = _klines_to_df(kl_d)
                 prev = ddf.iloc[-2]
@@ -1329,7 +1358,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     elif digest_5m_only and _signal_filters_enabled():
         for interval, key in (("15m", "15m"), ("1h", "1h")):
             try:
-                kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+                kl = _fetch_klines(client, symbol, interval, limit)
                 if kl and len(kl) >= 60:
                     dfx = _klines_to_df(kl)
                     sc, _ = _analyze_ohlcv(dfx)
@@ -3020,7 +3049,7 @@ def main() -> int:
         print("No Telegram recipients (subscribers file or TELEGRAM_CHAT_ID).", file=sys.stderr)
         return 1
 
-    symbol = os.environ.get("TA_SYMBOL", "ETHUSDC").strip().upper()
+    symbol = _ta_digest_symbol()
     interval_sec = int(os.environ.get("TA_INTERVAL_SEC", "300"))
     limit = int(os.environ.get("TA_KLINES_LIMIT", "500"))
 
@@ -3043,7 +3072,7 @@ def main() -> int:
     preset_line = _env_preset_name()
     print(
         f"eth_ta_telegram: symbol={symbol} every {interval_sec}s trade_sim={trade_sim} "
-        f"trade_live={trade_live} "
+        f"trade_live={trade_live} futures_klines={_ta_futures_klines_enabled()} "
         f"TA_PRESET={preset_line or '(none)'} "
         f"30_MAR={_strategy_30_mar_enabled()} "
         f"gemini_entries={_gemini_entries_env_enabled()} "
