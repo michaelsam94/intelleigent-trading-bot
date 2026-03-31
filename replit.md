@@ -92,7 +92,34 @@ TA_KLINES_LIMIT=500        # candles fetched per timeframe
 TA_SIGNAL_FILTERS=1        # strict entry gates (ADX + MACD + HTF trend)
 TA_PRESET=high-win-rate    # preset tuning bundle (default on)
 GEMINI_API_KEY=...         # optional — enables Gemini AI signal layer
+# Precision signal entry gates (new)
+TA_PRECISION_ENTRY=1       # 1=open trades when precision signal fires (default on)
+TA_PRECISION_CONF_MIN=60   # minimum confidence % required to open a trade (default 60)
 ```
+
+### Precision Signal Trade Entry Logic
+
+When `TA_PRECISION_ENTRY=1` (default), the bot will open a trade whenever:
+- Precision signal confidence ≥ `TA_PRECISION_CONF_MIN` (default 60%)
+- Signal direction is LONG or HOLD
+
+**Priority with `TA_STRATEGY_30_MAR=1` (your setup):**
+1. 30_MAR confluence check runs first
+2. If 30_MAR finds a setup → uses 30_MAR TP/SL (ATR multiples)
+3. If 30_MAR has no setup → precision signal acts as fallback (if confidence ≥ threshold)
+4. If precision signal is also below threshold → skip cycle
+
+**Precision ATR-based TP/SL:**
+- SL = 10-bar swing low/high (S&R-anchored), floored at 1×ATR, minimum 0.3×ATR
+- TP = SL_distance × R:R multiplier (scales with confidence):
+
+| Confidence | R:R multiplier |
+|---|---|
+| 60% | 1.5:1 |
+| 70% | 2.0:1 |
+| 80% | 2.5:1 |
+| 90% | 3.0:1 |
+| 100% | 3.5:1 |
 
 ## Execution Workflow (Typical Usage)
 1. Download historical data: `python3 -m scripts.download`

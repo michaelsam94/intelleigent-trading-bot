@@ -261,6 +261,19 @@ def _strategy_30_mar_enabled() -> bool:
     return _sf_sub("TA_STRATEGY_30_MAR", "0")
 
 
+def _precision_entry_enabled() -> bool:
+    """Open a trade from the precision signal when confidence >= TA_PRECISION_CONF_MIN (default on)."""
+    return os.environ.get("TA_PRECISION_ENTRY", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _precision_conf_threshold() -> int:
+    """Minimum precision signal confidence (0-100) required to open a trade. Default 60."""
+    try:
+        return int(os.environ.get("TA_PRECISION_CONF_MIN", "60"))
+    except ValueError:
+        return 60
+
+
 def _gemini_entries_env_enabled() -> bool:
     """
     Whether Gemini is enabled for paper-trade entries (before TA_OPEN_EVERY_DIGEST turns it off).
@@ -1655,6 +1668,65 @@ def _fixed_tp_sl_levels(
     return tp_p, sl_p, "underlying"
 
 
+def _precision_atr_tp_sl(
+    df: pd.DataFrame, side: str, close: float, confidence: int
+) -> tuple[float, float, float, float, str]:
+    """
+    Accurate ATR-based TP and SL for precision signal entries.
+
+    Method:
+    - SL anchored to the 10-bar swing low (LONG) or swing high (SHORT), capped at 1×ATR from entry.
+      Swing SL is used only when it is tighter (closer to price) than the ATR-SL, giving a
+      support/resistance-defined risk level rather than an arbitrary multiple.
+    - Minimum SL distance: 0.3×ATR (prevents getting stopped on noise).
+    - TP = actual_SL_distance × R:R multiplier, where R:R scales with confidence:
+        60% → 1.5:1,  70% → 2.0:1,  80% → 2.5:1,  90% → 3.0:1,  100% → 3.5:1
+
+    Returns (tp_price, sl_price, rr_mult, sl_atr_mult, description).
+    """
+    atr = _atr_from_df(df)
+    if atr is None or atr <= 0:
+        dist = close * 0.004
+        if side == "LONG":
+            return close + dist * 1.5, close - dist, 1.5, 0.0, "TP/SL: price-fallback (ATR unavailable)"
+        return close - dist * 1.5, close + dist, 1.5, 0.0, "TP/SL: price-fallback (ATR unavailable)"
+
+    conf_norm = min(max((confidence - 60) / 40.0, 0.0), 1.0)
+    rr_mult = 1.5 + conf_norm * 2.0
+
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
+    lookback = min(10, len(df) - 1)
+
+    if side == "LONG":
+        swing_sl = float(np.min(lows[-lookback:])) if lookback > 0 else close - atr
+        atr_sl = close - atr
+        sl_price = swing_sl if (close > swing_sl > atr_sl) else atr_sl
+        sl_price = min(sl_price, close - atr * 0.3)
+        sl_dist = close - sl_price
+        if sl_dist <= 1e-9:
+            sl_dist = atr
+            sl_price = close - sl_dist
+        tp_price = close + rr_mult * sl_dist
+    else:
+        swing_sl = float(np.max(highs[-lookback:])) if lookback > 0 else close + atr
+        atr_sl = close + atr
+        sl_price = swing_sl if (close < swing_sl < atr_sl) else atr_sl
+        sl_price = max(sl_price, close + atr * 0.3)
+        sl_dist = sl_price - close
+        if sl_dist <= 1e-9:
+            sl_dist = atr
+            sl_price = close + sl_dist
+        tp_price = close - rr_mult * sl_dist
+
+    sl_atr_mult = sl_dist / atr if atr > 0 else 1.0
+    desc = (
+        f"ATR(14)≈{atr:.4f} | SL {sl_atr_mult:.2f}×ATR | "
+        f"TP {rr_mult:.2f}:1 R:R | Conf {confidence}%"
+    )
+    return tp_price, sl_price, rr_mult, sl_atr_mult, desc
+
+
 def _round_to_step(v: float, step: float, up: bool = False) -> float:
     if step <= 0:
         return float(v)
@@ -1892,8 +1964,33 @@ def _decide_ta_entry(
     if _strategy_30_mar_enabled():
         mar_side, mar_reason, tpm_o, slm_o = _evaluate_30_mar_entry(snap)
         if not mar_side:
-            print(f"LIVE 30_MAR skip: {mar_reason}", flush=True)
-            return None
+            if (
+                _precision_entry_enabled()
+                and snap.precision is not None
+                and snap.precision.action in ("LONG", "SHORT")
+                and snap.precision.confidence >= _precision_conf_threshold()
+            ):
+                ps = snap.precision
+                side = ps.action
+                tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
+                    df, side, close_price, ps.confidence
+                )
+                print(
+                    f"LIVE Precision entry (30_MAR: {mar_reason}): "
+                    f"{side} conf={ps.confidence}% | {ptp_desc}",
+                    flush=True,
+                )
+                reverse_on = _reverse_signals_enabled()
+                if reverse_on:
+                    live_gemini_zone = None
+                    if tp_price > 0 and sl_price > 0:
+                        side, tp_price, sl_price = _reverse_side_and_levels(side, close_price, tp_price, sl_price)
+                    else:
+                        side = _opposite_side(side)
+                return side, close_price, tp_price, sl_price, lev, None
+            else:
+                print(f"LIVE 30_MAR skip: {mar_reason}", flush=True)
+                return None
         side = mar_side
         tp_price, sl_price, _mode = _fixed_tp_sl_levels(
             side,
@@ -2011,6 +2108,19 @@ def _decide_ta_entry(
                 )
             else:
                 print("LIVE Gemini returned no usable decision.", flush=True)
+
+    if not side and _precision_entry_enabled() and snap.precision is not None:
+        ps = snap.precision
+        if ps.action in ("LONG", "SHORT") and ps.confidence >= _precision_conf_threshold():
+            side = ps.action
+            tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
+                df, side, close_price, ps.confidence
+            )
+            print(
+                f"LIVE Precision entry: {side} conf={ps.confidence}% | {ptp_desc}",
+                flush=True,
+            )
+
     if not side:
         return None
     reverse_on = _reverse_signals_enabled()
@@ -2471,32 +2581,51 @@ def process_ta_trade_sim(
     if _strategy_30_mar_enabled():
         mar_side, mar_reason, tpm_o, slm_o = _evaluate_30_mar_entry(snap)
         if not mar_side:
-            print(f"TA-SIM 30_MAR skip: {mar_reason}", flush=True)
-            return
-        side = mar_side
-        tp_price, sl_price, last_fixed_mode = _fixed_tp_sl_levels(
-            side,
-            close_price,
-            price_tp_pct,
-            price_sl_pct,
-            lev,
-            atr_sig,
-            tp_atr_mult=tpm_o,
-            sl_atr_mult=slm_o,
-        )
-        if last_fixed_mode == "atr" and atr_sig is not None and tpm_o is not None and slm_o is not None:
-            tp_sl_txt = (
-                f"TP {tpm_o}×ATR / SL {slm_o}×ATR "
-                f"(ATR(14)≈{atr_sig:.4f}, {tpm_o:.1f}:{slm_o:.1f} TP:SL on price)"
-            )
-        elif last_fixed_mode == "margin":
-            tp_sl_txt = (
-                f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
-                f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
-            )
+            if (
+                _precision_entry_enabled()
+                and snap.precision is not None
+                and snap.precision.action in ("LONG", "SHORT")
+                and snap.precision.confidence >= _precision_conf_threshold()
+            ):
+                ps = snap.precision
+                side = ps.action
+                tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
+                    df, side, close_price, ps.confidence
+                )
+                open_extra = f"Precision Signal conf={ps.confidence}% | {ptp_desc}"
+                print(
+                    f"TA-SIM Precision entry (30_MAR: {mar_reason}): "
+                    f"{side} conf={ps.confidence}% | {ptp_desc}",
+                    flush=True,
+                )
+            else:
+                print(f"TA-SIM 30_MAR skip: {mar_reason}", flush=True)
+                return
         else:
-            tp_sl_txt = f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
-        open_extra = f"{mar_reason} | {tp_sl_txt}"
+            side = mar_side
+            tp_price, sl_price, last_fixed_mode = _fixed_tp_sl_levels(
+                side,
+                close_price,
+                price_tp_pct,
+                price_sl_pct,
+                lev,
+                atr_sig,
+                tp_atr_mult=tpm_o,
+                sl_atr_mult=slm_o,
+            )
+            if last_fixed_mode == "atr" and atr_sig is not None and tpm_o is not None and slm_o is not None:
+                tp_sl_txt = (
+                    f"TP {tpm_o}×ATR / SL {slm_o}×ATR "
+                    f"(ATR(14)≈{atr_sig:.4f}, {tpm_o:.1f}:{slm_o:.1f} TP:SL on price)"
+                )
+            elif last_fixed_mode == "margin":
+                tp_sl_txt = (
+                    f"TP +{price_tp_pct}% / SL -{price_sl_pct}% on margin "
+                    f"(≈{price_tp_pct / lev:.3f}% / {price_sl_pct / lev:.3f}% ETH move @ {lev}x)"
+                )
+            else:
+                tp_sl_txt = f"TP +{price_tp_pct}% / SL -{price_sl_pct}% (underlying price)"
+            open_extra = f"{mar_reason} | {tp_sl_txt}"
     elif open_every:
         sc5 = snap.score_5m
         lab5 = (snap.label_5m or "").strip()
@@ -2665,6 +2794,19 @@ def process_ta_trade_sim(
             tp_price = close_price - atr * tp_mult
             sl_price = close_price + atr * sl_mult
             open_extra = f"{es} TA score {ms:+.2f} (ATR TP/SL)"
+
+    if not side and _precision_entry_enabled() and snap.precision is not None:
+        ps = snap.precision
+        if ps.action in ("LONG", "SHORT") and ps.confidence >= _precision_conf_threshold():
+            side = ps.action
+            tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
+                df, side, close_price, ps.confidence
+            )
+            open_extra = f"Precision Signal conf={ps.confidence}% | {ptp_desc}"
+            print(
+                f"TA-SIM Precision entry: {side} conf={ps.confidence}% | {ptp_desc}",
+                flush=True,
+            )
 
     if not side:
         return
