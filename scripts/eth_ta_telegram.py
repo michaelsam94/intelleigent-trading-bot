@@ -61,6 +61,9 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_SF_HT_BEARISH_MAX=-0.5   # HTF score at/below = bearish (blocks LONG)
   TA_SF_HT_BULLISH_MIN=0.5    # HTF score at/above = bullish (blocks SHORT)
 
+  Live futures — precision-only entries (optional):
+  TA_LIVE_PRECISION_ONLY=0    # 1 = ignore TA score + Gemini for direction; require precision >= TA_PRECISION_CONF_MIN
+
   TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
 
   Preset (optional — matches scripts/backtest_ta_signals.py --preset high-win-rate):
@@ -305,6 +308,14 @@ def _precision_conf_threshold() -> int:
         return int(os.environ.get("TA_PRECISION_CONF_MIN", "60"))
     except ValueError:
         return 60
+
+
+def _live_precision_only_enabled() -> bool:
+    """
+    Live futures only (_decide_ta_entry): do not use TA score or Gemini for direction.
+    Entry only when TA_PRECISION_ENTRY=1 and precision LONG/SHORT with confidence >= TA_PRECISION_CONF_MIN.
+    """
+    return os.environ.get("TA_LIVE_PRECISION_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _gemini_entries_env_enabled() -> bool:
@@ -2054,7 +2065,11 @@ def _decide_ta_entry(
         print("LIVE Gemini override active: using Gemini despite TA_OPEN_EVERY_DIGEST=1", flush=True)
     if skip_ta_for_live_side:
         print("LIVE entry: Gemini-only (TA_OPEN_EVERY / score thresholds not used for direction)", flush=True)
-    if not skip_ta_for_live_side:
+    if _live_precision_only_enabled():
+        if not _precision_entry_enabled():
+            print("LIVE skip: TA_LIVE_PRECISION_ONLY=1 requires TA_PRECISION_ENTRY=1", flush=True)
+            return None
+    if not _live_precision_only_enabled() and not skip_ta_for_live_side:
         if open_every and not gemini_override_open_every:
             sc5 = snap.score_5m
             lab5 = (snap.label_5m or "").strip()
@@ -2081,7 +2096,7 @@ def _decide_ta_entry(
                 side = "LONG"
             elif want_short and not want_long:
                 side = "SHORT"
-    if not side and use_gemini_live:
+    if not _live_precision_only_enabled() and not side and use_gemini_live:
         dec = gemini_dec
         if dec is None and not gemini_shared_ran:
             try:
@@ -2141,6 +2156,15 @@ def _decide_ta_entry(
                 )
             else:
                 print("LIVE Gemini returned no usable decision.", flush=True)
+
+    if _live_precision_only_enabled() and not side and snap.precision is not None:
+        ps = snap.precision
+        if ps.action in ("LONG", "SHORT") and ps.confidence < _precision_conf_threshold():
+            print(
+                f"LIVE skip: TA_LIVE_PRECISION_ONLY=1 — precision conf {ps.confidence}% "
+                f"< TA_PRECISION_CONF_MIN ({_precision_conf_threshold()})",
+                flush=True,
+            )
 
     if not side and _precision_entry_enabled() and snap.precision is not None:
         ps = snap.precision
