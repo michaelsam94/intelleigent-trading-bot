@@ -12,6 +12,11 @@ Env (digest):
   TA_SIGNAL_ALERTS=1
   TELEGRAM_BOT_TOKEN=...
 
+  MTF backtest log (append same digest text as Telegram, for scripts/mtf_backtest.py):
+  TA_DIGEST_LOG_FILE=         # e.g. data/eth_ta_ethusdc.log (relative to project root); empty = use TA_DIGEST_LOG below
+  TA_DIGEST_LOG=0             # if 1 and TA_DIGEST_LOG_FILE unset: data/eth_ta_<SYMBOL>.log
+  For full multi-TF sections in the log, set TA_DIGEST_5M_ONLY=0.
+
 Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_TRADE_SIM=1              # or TA_TRADE_SIM_ENABLED / TA_TRADE_ENABLED; script merges project .env on startup
   TA_STARTING_BALANCE=10
@@ -93,6 +98,34 @@ import pandas as pd
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+
+def _ta_digest_log_target_path() -> Path | None:
+    """
+    Optional file append for each digest (scripts/mtf_backtest.py).
+    TA_DIGEST_LOG_FILE takes precedence; else TA_DIGEST_LOG=1 → data/eth_ta_<symbol>.log.
+    """
+    raw = (os.environ.get("TA_DIGEST_LOG_FILE") or "").strip()
+    if raw:
+        pa = Path(raw)
+        return pa if pa.is_absolute() else (_ROOT / pa)
+    if os.environ.get("TA_DIGEST_LOG", "").strip().lower() in ("1", "true", "yes", "on"):
+        sym = os.environ.get("TA_SYMBOL", "ETHUSDC").strip().upper().replace("/", "_")
+        return _ROOT / "data" / f"eth_ta_{sym.lower()}.log"
+    return None
+
+
+def _append_ta_digest_log(msg: str) -> None:
+    p = _ta_digest_log_target_path()
+    if p is None:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*72}\n# {stamp}\n{'='*72}\n{msg}\n")
+    except OSError as e:
+        print(f"TA_DIGEST_LOG write failed ({p}): {e}", file=sys.stderr, flush=True)
 
 
 def _load_project_dotenv() -> None:
@@ -3096,6 +3129,7 @@ def main() -> int:
                     "No TA-SIM entry/TP/SL messages are sent. "
                     "Set TA_TRADE_SIM=1 in project .env, then pm2 restart eth-ta-telegram --update-env"
                 )
+            _append_ta_digest_log(msg)
             if token and recipient_chat_ids({}):
                 n = broadcast_telegram_plain(token, msg, {})
                 print(f"{datetime.now(timezone.utc).isoformat()} digest sent to {n} chat(s)", flush=True)

@@ -148,6 +148,8 @@ module.exports = {
         TA_TP_PRICE_PCT: env.TA_TP_PRICE_PCT ?? "6",
         TA_SL_PRICE_PCT: env.TA_SL_PRICE_PCT ?? "2.5",
         TA_MIN_BARS_BETWEEN_TRADES: env.TA_MIN_BARS_BETWEEN_TRADES ?? "2",
+        // Append each TA digest to data/ for scripts/mtf_backtest.py (override or clear in .env)
+        TA_DIGEST_LOG_FILE: env.TA_DIGEST_LOG_FILE ?? "data/eth_ta_ethusdc.log",
       },
     },
   ],
