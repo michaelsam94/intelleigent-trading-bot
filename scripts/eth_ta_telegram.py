@@ -1741,63 +1741,114 @@ def _fixed_tp_sl_levels(
     return tp_p, sl_p, "underlying"
 
 
+def _precision_scalp_mode_enabled() -> bool:
+    """
+    Scalp mode: tight TP (hits often, small wins) + wide SL (rarely hit by noise).
+    Enabled via TA_PRECISION_SCALP_MODE=1. Default off (normal wide-TP mode).
+    """
+    return os.environ.get("TA_PRECISION_SCALP_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _precision_atr_tp_sl(
     df: pd.DataFrame, side: str, close: float, confidence: int
 ) -> tuple[float, float, float, float, str]:
     """
-    Accurate ATR-based TP and SL for precision signal entries.
+    ATR-based TP and SL for precision signal entries. Two modes:
 
-    Method:
-    - SL anchored to the 10-bar swing low (LONG) or swing high (SHORT), capped at 1×ATR from entry.
-      Swing SL is used only when it is tighter (closer to price) than the ATR-SL, giving a
-      support/resistance-defined risk level rather than an arbitrary multiple.
-    - Minimum SL distance: 0.3×ATR (prevents getting stopped on noise).
-    - TP = actual_SL_distance × R:R multiplier, where R:R scales with confidence:
-        60% → 1.5:1,  70% → 2.0:1,  80% → 2.5:1,  90% → 3.0:1,  100% → 3.5:1
+    NORMAL mode (TA_PRECISION_SCALP_MODE=0, default):
+      Favours bigger wins over higher win rate.
+      SL = 10-bar swing low/high (S&R-anchored), floor 0.3×ATR, cap 1×ATR.
+      TP = SL_dist × R:R (60%→1.5:1  70%→2.0:1  80%→2.5:1  90%→3.0:1  100%→3.5:1).
 
-    Returns (tp_price, sl_price, rr_mult, sl_atr_mult, description).
+    SCALP mode (TA_PRECISION_SCALP_MODE=1):
+      Favours high win rate: small TP that hits fast, wide SL that gives room.
+      TP_dist = ATR × TA_PRECISION_SCALP_TP_ATR (default 0.4, range 0.2-1.0).
+      SL = 20-bar swing (wider lookback) OR 2×ATR, whichever is wider, min 1.5×ATR.
+      A higher-confidence signal uses the same tight TP but a slightly tighter SL,
+      reflecting stronger edge (80%→1.8×ATR, 90%→1.6×ATR, 100%→1.4×ATR).
+
+    Returns (tp_price, sl_price, rr_mult_or_tp_atr, sl_atr_mult, description).
     """
     atr = _atr_from_df(df)
     if atr is None or atr <= 0:
-        dist = close * 0.004
+        dist = close * 0.003
         if side == "LONG":
-            return close + dist * 1.5, close - dist, 1.5, 0.0, "TP/SL: price-fallback (ATR unavailable)"
-        return close - dist * 1.5, close + dist, 1.5, 0.0, "TP/SL: price-fallback (ATR unavailable)"
-
-    conf_norm = min(max((confidence - 60) / 40.0, 0.0), 1.0)
-    rr_mult = 1.5 + conf_norm * 2.0
+            return close + dist, close - dist * 2.0, 0.5, 0.0, "TP/SL: price-fallback (ATR unavailable)"
+        return close - dist, close + dist * 2.0, 0.5, 0.0, "TP/SL: price-fallback (ATR unavailable)"
 
     highs = df["high"].values.astype(float)
     lows = df["low"].values.astype(float)
-    lookback = min(10, len(df) - 1)
+    conf_norm = min(max((confidence - 60) / 40.0, 0.0), 1.0)
 
-    if side == "LONG":
-        swing_sl = float(np.min(lows[-lookback:])) if lookback > 0 else close - atr
-        atr_sl = close - atr
-        sl_price = swing_sl if (close > swing_sl > atr_sl) else atr_sl
-        sl_price = min(sl_price, close - atr * 0.3)
-        sl_dist = close - sl_price
-        if sl_dist <= 1e-9:
-            sl_dist = atr
-            sl_price = close - sl_dist
-        tp_price = close + rr_mult * sl_dist
+    if _precision_scalp_mode_enabled():
+        # ── SCALP MODE: tight TP, wide SL ─────────────────────────────────
+        tp_atr_mult = float(os.environ.get("TA_PRECISION_SCALP_TP_ATR", "0.4"))
+        tp_atr_mult = min(max(tp_atr_mult, 0.1), 2.0)
+        tp_dist = atr * tp_atr_mult
+
+        # SL: 20-bar swing OR 2×ATR, whichever is wider; tightens slightly with confidence
+        sl_floor_mult = 2.0 - conf_norm * 0.6          # 2.0×ATR at 60%, 1.4×ATR at 100%
+        lookback = min(20, len(df) - 1)
+        if side == "LONG":
+            swing_sl = float(np.min(lows[-lookback:])) if lookback > 0 else close - atr * sl_floor_mult
+            atr_sl = close - atr * sl_floor_mult
+            sl_price = min(swing_sl, atr_sl)            # wider of the two (lower for LONG)
+            sl_price = min(sl_price, close - atr * 1.5) # enforce minimum width 1.5×ATR
+            sl_dist = close - sl_price
+            if sl_dist <= 1e-9:
+                sl_dist = atr * sl_floor_mult
+                sl_price = close - sl_dist
+            tp_price = close + tp_dist
+        else:
+            swing_sl = float(np.max(highs[-lookback:])) if lookback > 0 else close + atr * sl_floor_mult
+            atr_sl = close + atr * sl_floor_mult
+            sl_price = max(swing_sl, atr_sl)            # wider of the two (higher for SHORT)
+            sl_price = max(sl_price, close + atr * 1.5)
+            sl_dist = sl_price - close
+            if sl_dist <= 1e-9:
+                sl_dist = atr * sl_floor_mult
+                sl_price = close + sl_dist
+            tp_price = close - tp_dist
+
+        sl_atr_mult = sl_dist / atr if atr > 0 else sl_floor_mult
+        rr_display = tp_dist / sl_dist if sl_dist > 0 else 0.0
+        desc = (
+            f"[SCALP] ATR(14)≈{atr:.4f} | TP {tp_atr_mult:.2f}×ATR | "
+            f"SL {sl_atr_mult:.2f}×ATR | R:R {rr_display:.2f}:1 | Conf {confidence}%"
+        )
+        return tp_price, sl_price, tp_atr_mult, sl_atr_mult, desc
+
     else:
-        swing_sl = float(np.max(highs[-lookback:])) if lookback > 0 else close + atr
-        atr_sl = close + atr
-        sl_price = swing_sl if (close < swing_sl < atr_sl) else atr_sl
-        sl_price = max(sl_price, close + atr * 0.3)
-        sl_dist = sl_price - close
-        if sl_dist <= 1e-9:
-            sl_dist = atr
-            sl_price = close + sl_dist
-        tp_price = close - rr_mult * sl_dist
+        # ── NORMAL MODE: tight SL, wide TP ────────────────────────────────
+        rr_mult = 1.5 + conf_norm * 2.0
+        lookback = min(10, len(df) - 1)
+        if side == "LONG":
+            swing_sl = float(np.min(lows[-lookback:])) if lookback > 0 else close - atr
+            atr_sl = close - atr
+            sl_price = swing_sl if (close > swing_sl > atr_sl) else atr_sl
+            sl_price = min(sl_price, close - atr * 0.3)
+            sl_dist = close - sl_price
+            if sl_dist <= 1e-9:
+                sl_dist = atr
+                sl_price = close - sl_dist
+            tp_price = close + rr_mult * sl_dist
+        else:
+            swing_sl = float(np.max(highs[-lookback:])) if lookback > 0 else close + atr
+            atr_sl = close + atr
+            sl_price = swing_sl if (close < swing_sl < atr_sl) else atr_sl
+            sl_price = max(sl_price, close + atr * 0.3)
+            sl_dist = sl_price - close
+            if sl_dist <= 1e-9:
+                sl_dist = atr
+                sl_price = close + sl_dist
+            tp_price = close - rr_mult * sl_dist
 
-    sl_atr_mult = sl_dist / atr if atr > 0 else 1.0
-    desc = (
-        f"ATR(14)≈{atr:.4f} | SL {sl_atr_mult:.2f}×ATR | "
-        f"TP {rr_mult:.2f}:1 R:R | Conf {confidence}%"
-    )
-    return tp_price, sl_price, rr_mult, sl_atr_mult, desc
+        sl_atr_mult = sl_dist / atr if atr > 0 else 1.0
+        desc = (
+            f"ATR(14)≈{atr:.4f} | SL {sl_atr_mult:.2f}×ATR | "
+            f"TP {rr_mult:.2f}:1 R:R | Conf {confidence}%"
+        )
+        return tp_price, sl_price, rr_mult, sl_atr_mult, desc
 
 
 def _round_to_step(v: float, step: float, up: bool = False) -> float:
