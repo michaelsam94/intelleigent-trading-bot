@@ -17,11 +17,22 @@ Usage:
   --30-mar   Backtest TA_STRATEGY_30_MAR rules (eth_ta_telegram._evaluate_30_mar_entry).
              Strongly recommended with --binance (log digests usually lack MTF scores).
 
-  "strategy": "30_mar" in config.json also selects 30_MAR (overridden by --30-mar).
+  --precision  Backtest Precision Signal (_compute_precision_signal / _precision_entry_tp_sl
+             in eth_ta_telegram). Requires --binance (5m OHLCV replay). Tune strat.precision_conf_min
+             or TA_PRECISION_CONF_MIN; set TA_STRATEGY_ENHANCEMENTS=1 for regime TP/SL + conf boost.
+
+  "strategy": "30_mar" | "31_mar" | "precision" in config.json (CLI flags override when passed).
 
 With no log argument (and no --binance), reads data/eth_ta_ethusdc.log.
 
 Loads strat/sim/binance from configs/config.json when present, merged with defaults.
+
+Loss-streak pause (same gate as eth_ta_telegram TA-SIM): when TA_STRATEGY_ENHANCEMENTS=1 and
+TA_LOSS_STREAK_PAUSE=1, new entries are skipped after TA_LOSS_STREAK_PAUSE_COUNT consecutive
+trades with non-positive PnL% (reset after any winning trade).
+
+TA_MIN_BARS_AFTER_LOSS: if >0, after a losing trade (non-positive PnL%) the simulator skips
+entries until N more 5m snapshot bars have passed (same idea as TA-SIM + eth_ta_telegram).
 """
 
 import importlib.util
@@ -53,6 +64,9 @@ DEFAULT_STRAT: Dict[str, Any] = {
     "rsi_d": 35,
     "wr_5m": -90,
     "wr_d": -85,
+    # precision strategy (see --precision)
+    "precision_conf_min": 60,
+    "precision_apply_entry_filters": False,
 }
 DEFAULT_SIM: Dict[str, Any] = {
     "capital": 1000,
@@ -125,6 +139,8 @@ def _normalize_strategy_name(s: Any) -> str:
         return "30_mar"
     if n in ("31_mar", "31mar", "mar_31"):
         return "31_mar"
+    if n in ("precision", "precision_signal", "prec"):
+        return "precision"
     return "legacy"
 
 
@@ -177,6 +193,8 @@ class Snapshot:
     sig5m: str
     # Filled by Binance builder — required for accurate 30_MAR (ATR TP/SL, counter-trend path)
     df_5m_slice: Optional[pd.DataFrame] = None
+    # 1h bars closed by this 5m end (for precision regime / _get_regime)
+    df_1h_slice: Optional[pd.DataFrame] = None
     atr_5m: Optional[float] = None
 
 
@@ -298,6 +316,34 @@ def _snapshot_to_tasnapshot_30mar(eth: Any, snap: Snapshot) -> Any:
         mar_adx_daily=mar_adx_daily,
         mar_pivot=pivot,
         mar_vol_spike_5m=vol_spike,
+    )
+
+
+def _snapshot_to_tasnapshot_precision(eth: Any, snap: Snapshot, regime: str) -> Any:
+    """Minimal TASnapshot for _precision_entry_tp_sl and optional _entry_filters_pass."""
+    sl5 = snap.df_5m_slice
+    if sl5 is None or len(sl5) < 60:
+        raise ValueError("precision backtest needs df_5m_slice with >= 60 rows")
+    m5 = float(snap.score5m)
+    lab5 = eth._tf_label(m5)
+    htf: Dict[str, float] = {}
+    if "15m" in snap.tf:
+        htf["15m"] = float(snap.tf["15m"].score)
+    if "1h" in snap.tf:
+        htf["1h"] = float(snap.tf["1h"].score)
+    return eth.TASnapshot(
+        text="",
+        banner=None,
+        tf_scores=[m5],
+        tf_labels=[lab5],
+        mean_score=m5,
+        score_5m=m5,
+        score_for_entry=m5,
+        entry_score_kind="5m",
+        label_5m=lab5,
+        df_5m=sl5,
+        htf_scores=htf,
+        regime=regime,
     )
 
 
@@ -467,6 +513,12 @@ def build_snapshots_binance(binance_cfg: Dict[str, Any]) -> List[Snapshot]:
         price = float(df_5m["close"].iloc[i])
         atr_v = eth._atr_from_df(sl5)
         atr_f = float(atr_v) if atr_v is not None and float(atr_v) > 0 else None
+        sl1h: Optional[pd.DataFrame] = None
+        d1h = frames.get("1h")
+        if d1h is not None:
+            sl1h = d1h.loc[d1h["close_time"] <= end_ts].copy()
+            if len(sl1h) < 60:
+                sl1h = None
         snaps.append(
             Snapshot(
                 ts=ts_py,
@@ -476,6 +528,7 @@ def build_snapshots_binance(binance_cfg: Dict[str, Any]) -> List[Snapshot]:
                 score5m=t5.score,
                 sig5m=t5.signal,
                 df_5m_slice=sl5.copy(),
+                df_1h_slice=sl1h,
                 atr_5m=atr_f,
             )
         )
@@ -546,11 +599,19 @@ def parse_logs(text: str) -> List[Snapshot]:
                 except ValueError:
                     atr5 = None
 
-        snaps.append(Snapshot(ts, px, tfd, piv, 
-                             float(sc.group(1)) if sc else 0,
-                             sg.group(1) if sg else 'Neutral',
-                             None,
-                             atr5))
+        snaps.append(
+            Snapshot(
+                ts,
+                px,
+                tfd,
+                piv,
+                float(sc.group(1)) if sc else 0,
+                sg.group(1) if sg else "Neutral",
+                None,
+                None,
+                atr5,
+            )
+        )
     return sorted(snaps, key=lambda s: s.ts)
 
 # ----------------- STRATEGY -----------------
@@ -724,6 +785,43 @@ def _evaluate_31_mar_entry(
     return None, "31_MAR: no confluence setup", None, None
 
 
+def _max_drawdown_from_equity_curve(curve: List[Dict[str, Any]]) -> Tuple[float, float]:
+    """
+    Max drawdown from peak on the equity curve (each point is total equity after closed trades).
+    Returns (max_drawdown_pct_of_peak, max_drawdown_abs_vs_that_peak).
+    """
+    if not curve:
+        return 0.0, 0.0
+    peak = -float("inf")
+    max_dd_pct = 0.0
+    max_dd_abs = 0.0
+    for pt in curve:
+        e = float(pt["e"])
+        peak = max(peak, e)
+        dd_abs = peak - e
+        if dd_abs > max_dd_abs:
+            max_dd_abs = dd_abs
+        if peak > 1e-12:
+            dd_pct = dd_abs / peak * 100.0
+            if dd_pct > max_dd_pct:
+                max_dd_pct = dd_pct
+    return max_dd_pct, max_dd_abs
+
+
+def _loss_streak_pause_gated() -> bool:
+    """Match eth_ta_telegram TA-SIM: pause only when enhancements + TA_LOSS_STREAK_PAUSE=1."""
+    enh = os.environ.get("TA_STRATEGY_ENHANCEMENTS", "0").strip().lower() in ("1", "true", "yes", "on")
+    pause = os.environ.get("TA_LOSS_STREAK_PAUSE", "0").strip().lower() in ("1", "true", "yes", "on")
+    return enh and pause
+
+
+def _loss_streak_pause_count() -> int:
+    try:
+        return max(1, int(os.environ.get("TA_LOSS_STREAK_PAUSE_COUNT", "8")))
+    except ValueError:
+        return 8
+
+
 # ----------------- SIMULATOR -----------------
 def simulate(
     snaps: List[Snapshot],
@@ -733,7 +831,7 @@ def simulate(
     eth: Any = None,
     strategy: str = "legacy",
 ) -> Dict:
-    """Run backtest simulation (legacy mtf_signal or 30_MAR via eth._evaluate_30_mar_entry)."""
+    """Run backtest: legacy mtf_signal, 30_MAR / 31_MAR, or precision (eth_ta_telegram)."""
     if not snaps:
         return {
             'signals': 0,
@@ -744,15 +842,28 @@ def simulate(
             'profit_factor': float('inf'),
             'total_pnl': 0.0,
             'final_equity': sim_cfg['capital'],
+            'max_drawdown_pct': 0.0,
+            'max_drawdown_abs': 0.0,
             'trades': [],
             'equity_curve': [{'t': datetime.utcnow(), 'e': sim_cfg['capital']}],
         }
 
     trades, equity = [], [{'t': snaps[0].ts, 'e': sim_cfg['capital']}]
     eq, i = sim_cfg['capital'], 0
+    loss_streak = 0
+    pause_n = _loss_streak_pause_count()
+    pause_on = _loss_streak_pause_gated()
+    try:
+        n_loss_cool = max(0, int(os.environ.get("TA_MIN_BARS_AFTER_LOSS", "0")))
+    except ValueError:
+        n_loss_cool = 0
+    loss_cooldown_until_i = 0
 
     while i < len(snaps):
         snap = snaps[i]
+        if n_loss_cool > 0 and loss_cooldown_until_i > 0 and i < loss_cooldown_until_i:
+            i += 1
+            continue
         if strategy == "30_mar":
             if eth is None:
                 raise ValueError("simulate(..., strategy='30_mar') requires eth module")
@@ -779,8 +890,81 @@ def simulate(
                     "tp_atr_mult": tpm,
                     "sl_atr_mult": slm,
                 }
+        elif strategy == "precision":
+            if eth is None:
+                raise ValueError("simulate(..., strategy='precision') requires eth module")
+            sl5 = snap.df_5m_slice
+            if sl5 is None or len(sl5) < 60:
+                sig = {"sig": "WAIT", "reason": "precision: no 5m OHLCV slice (use --binance)"}
+            else:
+                regime = (
+                    eth._get_regime(snap.df_1h_slice)
+                    if snap.df_1h_slice is not None
+                    else "unknown"
+                )
+                if eth._strategy_enhancements_enabled():
+                    ps = eth._compute_precision_signal_enhanced(sl5, regime)
+                else:
+                    ps = eth._compute_precision_signal(sl5)
+                raw_pc = os.environ.get("TA_PRECISION_CONF_MIN")
+                if raw_pc is not None and str(raw_pc).strip() != "":
+                    try:
+                        conf_min = int(raw_pc)
+                    except ValueError:
+                        try:
+                            conf_min = int(strat_cfg.get("precision_conf_min", 60))
+                        except (TypeError, ValueError):
+                            conf_min = 60
+                else:
+                    try:
+                        conf_min = int(strat_cfg.get("precision_conf_min", 60))
+                    except (TypeError, ValueError):
+                        conf_min = 60
+                if ps.action not in ("LONG", "SHORT") or ps.confidence < conf_min:
+                    sig = {
+                        "sig": "WAIT",
+                        "reason": f"precision: {ps.action} conf={ps.confidence}% (min {conf_min})",
+                    }
+                else:
+                    tas = _snapshot_to_tasnapshot_precision(eth, snap, regime)
+                    if strat_cfg.get("precision_apply_entry_filters") and eth._signal_filters_enabled():
+                        ok_f, rsn = eth._entry_filters_pass(tas, ps.action, sl5)
+                        if not ok_f:
+                            sig = {"sig": "WAIT", "reason": f"precision filter: {rsn}"}
+                        else:
+                            close_px = float(sl5["close"].iloc[-1])
+                            tp_v, sl_v, _rr, _slm, pdesc = eth._precision_entry_tp_sl(
+                                sl5, ps.action, close_px, ps.confidence, tas
+                            )
+                            sig = {
+                                "sig": ps.action,
+                                "reason": f"precision {ps.action} conf={ps.confidence}% | {pdesc}",
+                                "tp_price": tp_v,
+                                "sl_price": sl_v,
+                            }
+                    else:
+                        close_px = float(sl5["close"].iloc[-1])
+                        tp_v, sl_v, _rr, _slm, pdesc = eth._precision_entry_tp_sl(
+                            sl5, ps.action, close_px, ps.confidence, tas
+                        )
+                        sig = {
+                            "sig": ps.action,
+                            "reason": f"precision {ps.action} conf={ps.confidence}% | {pdesc}",
+                            "tp_price": tp_v,
+                            "sl_price": sl_v,
+                        }
         else:
             sig = mtf_signal(snap, strat_cfg)
+
+        if (
+            sig["sig"] != "WAIT"
+            and pause_on
+            and loss_streak >= pause_n
+        ):
+            sig = {
+                "sig": "WAIT",
+                "reason": f"loss-streak pause ({loss_streak} consecutive losses ≥ {pause_n})",
+            }
 
         if sig["sig"] != "WAIT":
             entry_px = snap.price
@@ -788,7 +972,17 @@ def simulate(
             atr = snap.atr_5m
             tpm = sig.get("tp_atr_mult")
             slm = sig.get("sl_atr_mult")
+            tp_fix = sig.get("tp_price")
+            sl_fix = sig.get("sl_price")
             if (
+                strategy == "precision"
+                and tp_fix is not None
+                and sl_fix is not None
+                and float(tp_fix) > 0
+                and float(sl_fix) > 0
+            ):
+                tp, sl = float(tp_fix), float(sl_fix)
+            elif (
                 strategy in ("30_mar", "31_mar")
                 and atr is not None
                 and atr > 0
@@ -892,7 +1086,16 @@ def simulate(
                 )
                 eq += pnl_pct / 100 * sim_cfg['capital']
                 equity.append({'t': future.ts, 'e': eq})
-            
+                if pause_on:
+                    if pnl_pct is not None and pnl_pct > 0:
+                        loss_streak = 0
+                    else:
+                        loss_streak += 1
+                if n_loss_cool > 0 and pnl_pct is not None and pnl_pct <= 0:
+                    loss_cooldown_until_i = j + n_loss_cool
+                else:
+                    loss_cooldown_until_i = 0
+
             i += sim_cfg['skip_candles']  # Avoid overlapping trades
             continue
         i += 1
@@ -901,7 +1104,8 @@ def simulate(
     comp = [t for t in trades if t.exit_px]
     wins = [t for t in comp if t.pnl_pct and t.pnl_pct > 0]
     pnl = [t.pnl_pct for t in comp if t.pnl_pct is not None]
-    
+    mdd_pct, mdd_abs = _max_drawdown_from_equity_curve(equity)
+
     return {
         'signals': len(trades), 'completed': len(comp), 'wins': len(wins),
         'win_rate': len(wins)/len(comp)*100 if comp else 0,
@@ -909,6 +1113,8 @@ def simulate(
         'profit_factor': abs(sum(t.pnl_pct for t in wins)/sum(t.pnl_pct for t in comp if t.pnl_pct and t.pnl_pct<0)) if any(t.pnl_pct and t.pnl_pct<0 for t in comp) else float('inf'),
         'total_pnl': sum(pnl) if pnl else 0,
         'final_equity': eq,
+        'max_drawdown_pct': mdd_pct,
+        'max_drawdown_abs': mdd_abs,
         'trades': [asdict(t) for t in trades],
         'equity_curve': equity
     }
@@ -955,6 +1161,18 @@ def run_backtest(
             "📐 Strategy: 31_MAR — 5m score + 1h/MTF confluence + daily guard + ATR/pivot exits.",
             flush=True,
         )
+    elif strategy == "precision":
+        print(
+            "📐 Strategy: PRECISION — _compute_precision_signal + _precision_entry_tp_sl "
+            "(TA_STRATEGY_ENHANCEMENTS / TA_PRECISION_CONF_MIN from .env when set).",
+            flush=True,
+        )
+        if not use_binance:
+            print(
+                "⚠ Precision backtest needs 5m OHLCV slices — use --binance. "
+                "Digest logs have no df_5m → all WAIT.",
+                flush=True,
+            )
 
     if use_binance:
         print(
@@ -972,20 +1190,34 @@ def run_backtest(
         snaps = parse_logs(text)
         print(f"✓ Parsed {len(snaps)} snapshots")
 
+    if _loss_streak_pause_gated():
+        print(
+            f"⏸ Loss-streak pause: ON (≥{_loss_streak_pause_count()} consecutive non-wins) "
+            f"[TA_STRATEGY_ENHANCEMENTS + TA_LOSS_STREAK_PAUSE]",
+            flush=True,
+        )
     print("🎲 Running simulation...")
-    eth_mod = _load_eth_ta() if strategy == "30_mar" else None
+    eth_mod = _load_eth_ta() if strategy in ("30_mar", "precision") else None
     report = simulate(snaps, strat_cfg, sim_cfg, eth=eth_mod, strategy=strategy)
 
     if strategy == "30_mar":
         title = "30_MAR BACKTEST RESULTS"
     elif strategy == "31_mar":
         title = "31_MAR BACKTEST RESULTS"
+    elif strategy == "precision":
+        title = "PRECISION SIGNAL BACKTEST RESULTS"
     else:
         title = "BACKTEST RESULTS"
     print(f"\n📊 {title}")
     print(f"   Trades: {report['completed']} | Win Rate: {report['win_rate']:.1f}%")
     print(f"   Avg P/L: {report['avg_pnl']:+.2f}% | Total P/L: {report['total_pnl']:+.2f}%")
-    print(f"   Profit Factor: {report['profit_factor']:.2f} | Final Equity: ${report['final_equity']:.2f}")
+    pf = report["profit_factor"]
+    pf_s = f"{pf:.2f}" if pf != float("inf") and np.isfinite(pf) else "inf"
+    print(f"   Profit Factor: {pf_s} | Final Equity: ${report['final_equity']:.2f}")
+    print(
+        f"   Max drawdown: {report['max_drawdown_pct']:.2f}% "
+        f"(${report['max_drawdown_abs']:.2f} below equity peak on curve)"
+    )
     
     if report['trades']:
         print(f"\n📋 Last 5 trades:")
@@ -999,15 +1231,16 @@ if __name__ == "__main__":
     raw = sys.argv[1:]
     if not raw or raw[0] in ("-h", "--help"):
         print("Usage:")
-        print("  python scripts/mtf_backtest.py --binance [--30-mar|--31-mar] [--strict|--balanced|--loose] [config.json]")
-        print("  python scripts/mtf_backtest.py [--30-mar|--31-mar] [--strict|--balanced|--loose] [log_file.txt] [config.json]")
+        print("  python scripts/mtf_backtest.py --binance [--30-mar|--31-mar|--precision] [--strict|--balanced|--loose] [config.json]")
+        print("  python scripts/mtf_backtest.py [--30-mar|--31-mar|--precision] [--strict|--balanced|--loose] [log_file.txt] [config.json]")
         print('\n  --binance   Binance spot OHLCV replay')
         print('  --30-mar    Entry rules = eth_ta_telegram 30_MAR (prefer with --binance)')
         print('  --31-mar    New regime strategy from this history (HTF bear + LTF bull-trap fade)')
+        print('  --precision Precision signal + ATR TP/SL (requires --binance)')
         print('  --strict    31_MAR stricter filter preset')
         print('  --balanced  31_MAR balanced preset')
         print('  --loose     31_MAR looser filter preset')
-        print(f'\n  "strategy": "30_mar" or "31_mar" in {DEFAULT_CONFIG_PATH.name} also enables it.')
+        print(f'\n  "strategy": "30_mar" | "31_mar" | "precision" in {DEFAULT_CONFIG_PATH.name} also selects strategy.')
         print(f"\nDefault log (if omitted): {DEFAULT_ETH_DIGEST_LOG}")
         print(f"Default config (if present): {DEFAULT_CONFIG_PATH}")
         print("  TA_SYMBOL in .env overrides binance.symbol when using --binance.")
@@ -1015,6 +1248,7 @@ if __name__ == "__main__":
 
     use_30_mar = "--30-mar" in raw
     use_31_mar = "--31-mar" in raw
+    use_precision = "--precision" in raw
     m31_preset: str | None = None
     if "--strict" in raw:
         m31_preset = "strict"
@@ -1022,7 +1256,11 @@ if __name__ == "__main__":
         m31_preset = "balanced"
     elif "--loose" in raw:
         m31_preset = "loose"
-    raw = [a for a in raw if a not in ("--30-mar", "--31-mar", "--strict", "--balanced", "--loose")]
+    raw = [
+        a
+        for a in raw
+        if a not in ("--30-mar", "--31-mar", "--precision", "--strict", "--balanced", "--loose")
+    ]
     use_binance = "--binance" in raw
     pos = [a for a in raw if a != "--binance"]
 
@@ -1036,7 +1274,11 @@ if __name__ == "__main__":
                 print(f"Error: config file not found: {cfg_path}", file=sys.stderr)
                 sys.exit(1)
         strat_cfg, sim_cfg, binance_cfg, strat_from_cfg = load_mtf_config(cfg_path)
-        strategy = "31_mar" if use_31_mar else ("30_mar" if use_30_mar else strat_from_cfg)
+        strategy = (
+            "31_mar"
+            if use_31_mar
+            else ("30_mar" if use_30_mar else ("precision" if use_precision else strat_from_cfg))
+        )
         if cfg_path is None and DEFAULT_CONFIG_PATH.is_file():
             print(f"📋 Using config: {DEFAULT_CONFIG_PATH}")
         elif cfg_path is not None:
@@ -1068,7 +1310,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
     strat_cfg, sim_cfg, _binance_cfg, strat_from_cfg = load_mtf_config(cfg_path)
-    strategy = "31_mar" if use_31_mar else ("30_mar" if use_30_mar else strat_from_cfg)
+    strategy = (
+        "31_mar"
+        if use_31_mar
+        else ("30_mar" if use_30_mar else ("precision" if use_precision else strat_from_cfg))
+    )
     if cfg_path is None and DEFAULT_CONFIG_PATH.is_file():
         print(f"📋 Using config: {DEFAULT_CONFIG_PATH}")
     elif cfg_path is not None:

@@ -31,6 +31,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_LONG_ENTRY_SCORE=0.8      # mean TF score >= this → open LONG
   TA_SHORT_ENTRY_SCORE=-0.8    # mean TF score <= this → open SHORT
   TA_MIN_BARS_BETWEEN_TRADES=2 # 5m bars after a close before new entry (reduces fee drag)
+  TA_MIN_BARS_AFTER_LOSS=0     # if >0: after a losing close (SL), wait max(TA_MIN_BARS_BETWEEN_TRADES, this) 5m bars
   TA_STATE_DIR=data/ta_sim     # isolated from ML trader position.json
   TA_RESET_BALANCE_ON_RESTART=1  # reset balance, position, stats, last_close cooldown on process start
 
@@ -1688,22 +1689,27 @@ def _save_balance(symbol: str, balance: float, starting: float) -> None:
         json.dump({"balance": balance, "starting_balance": starting}, f)
 
 
-def _save_last_close(symbol: str, close_time) -> None:
+def _save_last_close(symbol: str, close_time, *, was_loss: bool = False) -> None:
     p = _last_close_path(symbol)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
-        json.dump({"last_close_time": str(close_time)}, f)
+        json.dump({"last_close_time": str(close_time), "was_loss": bool(was_loss)}, f)
 
 
-def _load_last_close(symbol: str) -> str | None:
+def _load_last_close(symbol: str) -> tuple[str | None, bool]:
+    """Returns (last_close_time_iso, was_loss). Legacy files without was_loss → False."""
     p = _last_close_path(symbol)
     if not p.is_file():
-        return None
+        return None, False
     try:
         with open(p, encoding="utf-8") as f:
-            return json.load(f).get("last_close_time")
+            d = json.load(f)
+        t = d.get("last_close_time")
+        if not t:
+            return None, False
+        return str(t), bool(d.get("was_loss", False))
     except Exception:
-        return None
+        return None, False
 
 
 def _atr_from_df(df: pd.DataFrame) -> float | None:
@@ -2843,7 +2849,7 @@ def process_ta_trade_sim(
 
             _save_balance(symbol, balance_after, starting_balance)
             _clear_position(symbol)
-            _save_last_close(symbol, close_time)
+            _save_last_close(symbol, close_time, was_loss=not win)
 
             txp = _tx_path(symbol)
             txp.parent.mkdir(parents=True, exist_ok=True)
@@ -2877,14 +2883,21 @@ def process_ta_trade_sim(
             )
         return
 
-    # --- flat: cooldown ---
-    last_c = _load_last_close(symbol)
-    if last_c is not None and min_bars > 0:
+    # --- flat: cooldown (min bars; longer wait after a losing close if TA_MIN_BARS_AFTER_LOSS > 0) ---
+    last_c, last_was_loss = _load_last_close(symbol)
+    if last_c is not None:
         try:
             last_ts = pd.Timestamp(last_c)
             now_ts = pd.Timestamp(close_time)
             bars_since = (now_ts - last_ts) / pd.Timedelta(minutes=5)
-            if bars_since < float(min_bars):
+            need = float(min_bars)
+            try:
+                loss_cool = int(os.environ.get("TA_MIN_BARS_AFTER_LOSS", "0"))
+            except ValueError:
+                loss_cool = 0
+            if last_was_loss and loss_cool > 0:
+                need = max(need, float(loss_cool))
+            if need > 0 and bars_since < need:
                 return
         except Exception:
             pass
