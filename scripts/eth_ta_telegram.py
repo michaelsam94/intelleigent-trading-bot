@@ -66,6 +66,23 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   Live futures — precision-only entries (optional):
   TA_LIVE_PRECISION_ONLY=0    # 1 = ignore TA score + Gemini for direction; require precision >= TA_PRECISION_CONF_MIN
 
+  Strategy enhancements (optional — set TA_STRATEGY_ENHANCEMENTS=1 to enable):
+  TA_STRATEGY_ENHANCEMENTS=0   # 1 = regime line in digest, top-down HTF + ranging filter, regime TP/SL for precision,
+                               # optional futures funding / long-short ratio filter on live entries, precision boost in trends
+  TA_TOP_DOWN_HTF_MIN_SCORE=0.8   # LONG needs 15m+1h scores >= this; SHORT needs both <= -this (when filters+enhancements on)
+  TA_REGIME_ADX_MIN=22            # 1h ADX floor for "trending" regime
+  TA_REGIME_ATR_PCT_MAX=2.5       # 1h ATR% cap for "trending" (else ranging)
+  TA_REGIME_WEAK_5M_ABS=2.0       # skip entries in ranging when |5m score| below this (with enhancements)
+  TA_FUTURES_SENTIMENT_FILTER=0   # 1 = live: skip LONG if funding% > TA_FUNDING_MAX_LONG; skip SHORT if L/S ratio > TA_LS_RATIO_MIN
+  TA_FUNDING_MAX_LONG=0.01        # percent (e.g. 0.01 = 0.01% funding)
+  TA_LS_RATIO_MIN=1.2             # Binance top long/short account ratio
+  TA_PRECISION_TRENDING_BOOST=1.15  # multiply precision confidence in trending regime
+  TA_LOSS_STREAK_PAUSE=0          # 1 = TA-SIM: pause new entries after TA_LOSS_STREAK_PAUSE_COUNT consecutive losses
+  TA_LOSS_STREAK_PAUSE_COUNT=8
+  TA_TRAILING_STOP_SIM=0          # 1 = TA-SIM: ratchet SL with ATR trail while position open (TA_TRAILING_STOP_ATR_MULT)
+  TA_TRAILING_STOP_ATR_MULT=1.5
+  TA_MAX_RISK_PCT_PER_TRADE=1.0   # logged on TA-SIM open when enhancements on (full-balance PnL model unchanged)
+
   TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
 
   Preset (optional — matches scripts/backtest_ta_signals.py --preset high-win-rate):
@@ -344,6 +361,11 @@ def _live_precision_only_enabled() -> bool:
     Entry only when TA_PRECISION_ENTRY=1 and precision LONG/SHORT with confidence >= TA_PRECISION_CONF_MIN.
     """
     return os.environ.get("TA_LIVE_PRECISION_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _strategy_enhancements_enabled() -> bool:
+    """Regime digest, stricter HTF/ranging gates, regime-aware precision TP/SL, optional live sentiment filter."""
+    return os.environ.get("TA_STRATEGY_ENHANCEMENTS", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _gemini_entries_env_enabled() -> bool:
@@ -1032,6 +1054,19 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     )
 
 
+def _compute_precision_signal_enhanced(df_5m: pd.DataFrame, regime: str) -> PrecisionSignal:
+    """Boost precision confidence slightly in trending 1h regime (TA_STRATEGY_ENHANCEMENTS)."""
+    ps = _compute_precision_signal(df_5m)
+    if regime != "trending":
+        return ps
+    try:
+        boost = float(os.environ.get("TA_PRECISION_TRENDING_BOOST", "1.15"))
+    except ValueError:
+        boost = 1.15
+    ps.confidence = min(100, int(ps.confidence * boost))
+    return ps
+
+
 def _adx_macd_from_df(df: pd.DataFrame) -> tuple[float | None, float | None]:
     close = df["close"].values.astype(float)
     high = df["high"].values.astype(float)
@@ -1264,6 +1299,53 @@ def _pivot_classic(prev: pd.Series) -> dict[str, float]:
     return {"P": pp, "R1": r1, "R2": r2, "R3": r3, "S1": s1, "S2": s2, "S3": s3}
 
 
+def _get_regime(df_1h: pd.DataFrame | None) -> str:
+    """1h ADX + ATR as percent of price → trending vs ranging (for digest + optional entry filters)."""
+    if df_1h is None or len(df_1h) < 60:
+        return "unknown"
+    close = df_1h["close"].values.astype(float)
+    high = df_1h["high"].values.astype(float)
+    low = df_1h["low"].values.astype(float)
+    adx = _last(talib.ADX(high, low, close, timeperiod=14))
+    atr = _last(talib.ATR(high, low, close, timeperiod=14))
+    if adx is None or atr is None or close[-1] <= 0:
+        return "unknown"
+    atr_pct = (atr / close[-1]) * 100.0
+    try:
+        adx_min = float(os.environ.get("TA_REGIME_ADX_MIN", "22"))
+    except ValueError:
+        adx_min = 22.0
+    try:
+        atr_max = float(os.environ.get("TA_REGIME_ATR_PCT_MAX", "2.5"))
+    except ValueError:
+        atr_max = 2.5
+    if adx >= adx_min and atr_pct <= atr_max:
+        return "trending"
+    return "ranging"
+
+
+def _get_funding_and_ls_ratio(client: Client, symbol: str) -> tuple[float | None, float | None]:
+    """
+    Futures funding rate (percent) and top long/short account ratio.
+    Returns (None, None) on failure so callers can skip filtering.
+    """
+    funding_pct: float | None = None
+    ls_ratio: float | None = None
+    try:
+        fr = client.futures_funding_rate(symbol=symbol, limit=1)
+        if fr:
+            funding_pct = float(fr[0]["fundingRate"]) * 100.0
+    except Exception:
+        pass
+    try:
+        ls = client.futures_top_long_short_account_ratio(symbol=symbol, period="5m", limit=1)
+        if ls:
+            ls_ratio = float(ls[0]["longShortRatio"])
+    except Exception:
+        pass
+    return funding_pct, ls_ratio
+
+
 @dataclass
 class TASnapshot:
     text: str
@@ -1284,6 +1366,7 @@ class TASnapshot:
     mar_pivot: dict[str, float] | None = None
     mar_vol_spike_5m: bool = False
     precision: PrecisionSignal | None = None
+    regime: str = "unknown"
 
 
 def build_snapshot(symbol: str, limit: int) -> TASnapshot:
@@ -1312,6 +1395,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     tf_scores: list[float] = []
     tf_labels: list[str] = []
     df_5m: pd.DataFrame | None = None
+    df_1h: pd.DataFrame | None = None
 
     for interval, label in frames:
         try:
@@ -1325,6 +1409,8 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         df = _klines_to_df(kl)
         if interval == "5m":
             df_5m = df
+        if interval == "1h":
+            df_1h = df
         sc, det = _analyze_ohlcv(df)
         tf_scores.append(sc)
         lab = _tf_label(sc)
@@ -1390,6 +1476,19 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     else:
         overall = "N/A"
 
+    regime = "unknown"
+    if _strategy_enhancements_enabled():
+        if df_1h is None:
+            try:
+                kl_h = _fetch_klines(client, symbol, "1h", min(limit, 500))
+                if kl_h and len(kl_h) >= 60:
+                    df_1h = _klines_to_df(kl_h)
+            except Exception:
+                pass
+        regime = _get_regime(df_1h)
+        lines.append(f"── Regime (1h): {regime.upper()} ──")
+        lines.append("")
+
     signal_banner: str | None = None
     if os.environ.get("TA_SIGNAL_ALERTS", "1").strip().lower() in ("1", "true", "yes", "on"):
         if use_5m_signal and tf_labels:
@@ -1437,7 +1536,10 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     precision: PrecisionSignal | None = None
     precision_header_lines: list[str] = []
     try:
-        precision = _compute_precision_signal(df_5m)
+        if _strategy_enhancements_enabled():
+            precision = _compute_precision_signal_enhanced(df_5m, regime)
+        else:
+            precision = _compute_precision_signal(df_5m)
         action_emoji = {"LONG": "🟢", "SHORT": "🔴", "HOLD": "🟡"}.get(precision.action, "⚪")
         bar = "█" * (precision.confidence // 10) + "░" * (10 - precision.confidence // 10)
         precision_header_lines.append(
@@ -1476,6 +1578,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         mar_pivot=mar_pivot,
         mar_vol_spike_5m=mar_vol_spike_5m,
         precision=precision,
+        regime=regime,
     )
 
 
@@ -1502,20 +1605,24 @@ def _stats_path(symbol: str) -> Path:
 def _load_stats(symbol: str) -> dict[str, int]:
     p = _stats_path(symbol)
     if not p.is_file():
-        return {"wins": 0, "losses": 0}
+        return {"wins": 0, "losses": 0, "loss_streak": 0}
     try:
         with open(p, encoding="utf-8") as f:
             d = json.load(f)
-        return {"wins": int(d.get("wins", 0)), "losses": int(d.get("losses", 0))}
+        return {
+            "wins": int(d.get("wins", 0)),
+            "losses": int(d.get("losses", 0)),
+            "loss_streak": int(d.get("loss_streak", 0)),
+        }
     except Exception:
-        return {"wins": 0, "losses": 0}
+        return {"wins": 0, "losses": 0, "loss_streak": 0}
 
 
-def _save_stats(symbol: str, wins: int, losses: int) -> None:
+def _save_stats(symbol: str, wins: int, losses: int, loss_streak: int = 0) -> None:
     p = _stats_path(symbol)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
-        json.dump({"wins": wins, "losses": losses}, f, indent=2)
+        json.dump({"wins": wins, "losses": losses, "loss_streak": loss_streak}, f, indent=2)
 
 
 def _tx_path(symbol: str) -> Path:
@@ -1656,6 +1763,36 @@ def _entry_filters_pass(snap: TASnapshot, side: str, df: pd.DataFrame) -> tuple[
     """
     if not _signal_filters_enabled():
         return True, ""
+
+    if _strategy_enhancements_enabled():
+        h15 = snap.htf_scores.get("15m")
+        h1h = snap.htf_scores.get("1h")
+        if h15 is not None and h1h is not None:
+            try:
+                htf_min = float(os.environ.get("TA_TOP_DOWN_HTF_MIN_SCORE", "0.8"))
+            except ValueError:
+                htf_min = 0.8
+            if side == "LONG" and (h15 < htf_min or h1h < htf_min):
+                return (
+                    False,
+                    f"HTF not bullish enough for LONG (15m={h15:+.2f} 1h={h1h:+.2f}, need ≥{htf_min})",
+                )
+            if side == "SHORT" and (h15 > -htf_min or h1h > -htf_min):
+                return (
+                    False,
+                    f"HTF not bearish enough for SHORT (15m={h15:+.2f} 1h={h1h:+.2f}, need ≤{-htf_min})",
+                )
+        reg = getattr(snap, "regime", "unknown")
+        if reg == "ranging":
+            try:
+                weak = float(os.environ.get("TA_REGIME_WEAK_5M_ABS", "2.0"))
+            except ValueError:
+                weak = 2.0
+            if abs(snap.score_5m) < weak:
+                return (
+                    False,
+                    f"Ranging regime + weak 5m score ({snap.score_5m:+.2f}, need |5m|≥{weak})",
+                )
 
     if _sf_sub("TA_SF_SCORE_FILTER", "1"):
         long_min = float(os.environ.get("TA_SF_LONG_MIN", "2.0"))
@@ -1849,6 +1986,42 @@ def _precision_atr_tp_sl(
             f"TP {rr_mult:.2f}:1 R:R | Conf {confidence}%"
         )
         return tp_price, sl_price, rr_mult, sl_atr_mult, desc
+
+
+def _precision_atr_tp_sl_enhanced(
+    df: pd.DataFrame, side: str, close: float, confidence: int, regime: str
+) -> tuple[float, float, float, float, str]:
+    """
+    Simpler regime-scaled ATR stop and R:R (used when TA_STRATEGY_ENHANCEMENTS=1).
+    Trending: tighter SL mult, higher R:R; ranging: wider SL, lower R:R.
+    """
+    atr = _atr_from_df(df)
+    if atr is None or atr <= 0:
+        return _precision_atr_tp_sl(df, side, close, confidence)
+    sl_mult = 1.0 if regime == "trending" else 1.4
+    rr_mult = 2.5 if regime == "trending" else 1.8
+    if side == "LONG":
+        sl_price = close - atr * sl_mult
+        tp_price = close + rr_mult * (close - sl_price)
+    else:
+        sl_price = close + atr * sl_mult
+        tp_price = close - rr_mult * (sl_price - close)
+    sl_atr_mult = sl_mult
+    desc = (
+        f"regime={regime} SL={sl_mult:.2f}×ATR | TP {rr_mult:.2f}:1 | "
+        f"ATR(14)≈{atr:.4f} | Conf {confidence}%"
+    )
+    return tp_price, sl_price, rr_mult, sl_atr_mult, desc
+
+
+def _precision_entry_tp_sl(
+    df: pd.DataFrame, side: str, close: float, confidence: int, snap: TASnapshot
+) -> tuple[float, float, float, float, str]:
+    if _strategy_enhancements_enabled():
+        return _precision_atr_tp_sl_enhanced(
+            df, side, close, confidence, getattr(snap, "regime", "unknown")
+        )
+    return _precision_atr_tp_sl(df, side, close, confidence)
 
 
 def _round_to_step(v: float, step: float, up: bool = False) -> float:
@@ -2096,8 +2269,8 @@ def _decide_ta_entry(
             ):
                 ps = snap.precision
                 side = ps.action
-                tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
-                    df, side, close_price, ps.confidence
+                tp_price, sl_price, _rr, _slm, ptp_desc = _precision_entry_tp_sl(
+                    df, side, close_price, ps.confidence, snap
                 )
                 print(
                     f"LIVE Precision entry (30_MAR: {mar_reason}): "
@@ -2250,8 +2423,8 @@ def _decide_ta_entry(
         ps = snap.precision
         if ps.action in ("LONG", "SHORT") and ps.confidence >= _precision_conf_threshold():
             side = ps.action
-            tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
-                df, side, close_price, ps.confidence
+            tp_price, sl_price, _rr, _slm, ptp_desc = _precision_entry_tp_sl(
+                df, side, close_price, ps.confidence, snap
             )
             print(
                 f"LIVE Precision entry: {side} conf={ps.confidence}% | {ptp_desc}",
@@ -2324,6 +2497,30 @@ def process_ta_trade_live_futures(
         print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
         return
     side, close_price, tp_price, sl_price, lev, gemini_zone = dec
+
+    if _strategy_enhancements_enabled() and _sf_sub("TA_FUTURES_SENTIMENT_FILTER", "0"):
+        fund_pct, ls_ratio = _get_funding_and_ls_ratio(client, fut_symbol)
+        try:
+            fmax = float(os.environ.get("TA_FUNDING_MAX_LONG", "0.01"))
+        except ValueError:
+            fmax = 0.01
+        try:
+            ls_min = float(os.environ.get("TA_LS_RATIO_MIN", "1.2"))
+        except ValueError:
+            ls_min = 1.2
+        if side == "LONG" and fund_pct is not None and fund_pct > fmax:
+            print(
+                f"LIVE skip: crowded LONG (funding {fund_pct:.4f}% > TA_FUNDING_MAX_LONG {fmax})",
+                flush=True,
+            )
+            return
+        if side == "SHORT" and ls_ratio is not None and ls_ratio > ls_min:
+            print(
+                f"LIVE skip: crowded SHORT (long/short ratio {ls_ratio:.3f} > TA_LS_RATIO_MIN {ls_min})",
+                flush=True,
+            )
+            return
+
     _futures_setup(client, fut_symbol, int(lev), isolated=True)
     tick, step, min_qty, min_notional = _futures_symbol_filters(client, fut_symbol)
     order_book = client.futures_order_book(symbol=fut_symbol, limit=5)
@@ -2595,6 +2792,25 @@ def process_ta_trade_sim(
         entry = float(pos["entry_price"])
         tp_price = float(pos["tp_price"])
         sl_price = float(pos["sl_price"])
+        if _strategy_enhancements_enabled() and _sf_sub("TA_TRAILING_STOP_SIM", "0"):
+            atr_e = float(pos.get("atr_at_entry") or 0)
+            if atr_e > 0:
+                try:
+                    tmult = float(os.environ.get("TA_TRAILING_STOP_ATR_MULT", "1.5"))
+                except ValueError:
+                    tmult = 1.5
+                if side == "LONG":
+                    trail_sl = high_price - tmult * atr_e
+                    if trail_sl > sl_price and trail_sl < close_price:
+                        sl_price = trail_sl
+                        pos["sl_price"] = sl_price
+                        _save_position(symbol, pos)
+                else:
+                    trail_sl = low_price + tmult * atr_e
+                    if trail_sl < sl_price and trail_sl > close_price:
+                        sl_price = trail_sl
+                        pos["sl_price"] = sl_price
+                        _save_position(symbol, pos)
         hit_tp = hit_sl = False
         exit_price = close_price
         if side == "LONG":
@@ -2639,11 +2855,14 @@ def process_ta_trade_sim(
             win = hit_tp
             emoji = "✅" if win else "❌"
             st0 = _load_stats(symbol)
+            prev_ls = int(st0.get("loss_streak", 0))
             if win:
                 st0["wins"] += 1
+                new_ls = 0
             else:
                 st0["losses"] += 1
-            _save_stats(symbol, st0["wins"], st0["losses"])
+                new_ls = prev_ls + 1
+            _save_stats(symbol, st0["wins"], st0["losses"], new_ls)
             closed_n = st0["wins"] + st0["losses"]
 
             _tx(
@@ -2669,6 +2888,20 @@ def process_ta_trade_sim(
                 return
         except Exception:
             pass
+
+    if _strategy_enhancements_enabled() and _sf_sub("TA_LOSS_STREAK_PAUSE", "0"):
+        st_ls = _load_stats(symbol)
+        try:
+            pause_n = int(os.environ.get("TA_LOSS_STREAK_PAUSE_COUNT", "8"))
+        except ValueError:
+            pause_n = 8
+        if int(st_ls.get("loss_streak", 0)) >= pause_n:
+            print(
+                f"TA-SIM skip: loss-streak pause (consecutive losses ≥ {pause_n}, "
+                f"TA_LOSS_STREAK_PAUSE=1)",
+                flush=True,
+            )
+            return
 
     # --- entry: TA_OPEN_EVERY_DIGEST (5m) > Gemini > fixed% + score_for_entry > ATR + score_for_entry ---
     open_every = os.environ.get("TA_OPEN_EVERY_DIGEST", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -2726,8 +2959,8 @@ def process_ta_trade_sim(
             ):
                 ps = snap.precision
                 side = ps.action
-                tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
-                    df, side, close_price, ps.confidence
+                tp_price, sl_price, _rr, _slm, ptp_desc = _precision_entry_tp_sl(
+                    df, side, close_price, ps.confidence, snap
                 )
                 open_extra = f"Precision Signal conf={ps.confidence}% | {ptp_desc}"
                 print(
@@ -2936,8 +3169,8 @@ def process_ta_trade_sim(
         ps = snap.precision
         if ps.action in ("LONG", "SHORT") and ps.confidence >= _precision_conf_threshold():
             side = ps.action
-            tp_price, sl_price, _rr, _slm, ptp_desc = _precision_atr_tp_sl(
-                df, side, close_price, ps.confidence
+            tp_price, sl_price, _rr, _slm, ptp_desc = _precision_entry_tp_sl(
+                df, side, close_price, ps.confidence, snap
             )
             open_extra = f"Precision Signal conf={ps.confidence}% | {ptp_desc}"
             print(
@@ -2971,7 +3204,7 @@ def process_ta_trade_sim(
             side = _opposite_side(side)
         open_extra = f"{open_extra} | {rev_note}" if open_extra else rev_note
 
-    if _strategy_30_mar_enabled():
+    if _strategy_30_mar_enabled() and not _strategy_enhancements_enabled():
         ok, skip_reason = True, ""
     else:
         ok, skip_reason = _entry_filters_pass(snap, side, df)
@@ -3003,12 +3236,26 @@ def process_ta_trade_sim(
             meta = f"Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
     else:
         meta = f"ATR(14)≈{atr:.4f} | Leverage {lev}x | Balance ${balance_before:.2f}\nFees: {fee_bps} bps/side (margin-style)"
+    enh_risk = ""
+    if _strategy_enhancements_enabled():
+        try:
+            rp = float(os.environ.get("TA_MAX_RISK_PCT_PER_TRADE", "1.0"))
+        except ValueError:
+            rp = 1.0
+        sl_dist = abs(close_price - sl_price)
+        notional_at_risk = (
+            (balance_before * (rp / 100.0) / sl_dist * close_price) if sl_dist > 1e-12 else 0.0
+        )
+        enh_risk = (
+            f"\nEnhancements: TA_MAX_RISK_PCT_PER_TRADE={rp}% "
+            f"(~${notional_at_risk:,.2f} equiv. notional vs SL dist; PnL still full-balance model)"
+        )
     _tx(
         f"{emoji} TA-SIM {side} opened\n"
         f"{open_extra}\n"
         f"Price: {close_price:,.2f}\n"
         f"TP: {tp_price:,.2f} | SL: {sl_price:,.2f}\n"
-        f"{meta}"
+        f"{meta}{enh_risk}"
     )
 
 
@@ -3077,6 +3324,11 @@ def _build_gemini_signal_block(
         f"Gemini digest signal built: action={action} conviction={conviction}/10 confidence={conf}/100",
         flush=True,
     )
+    if _strategy_enhancements_enabled():
+        line += (
+            "\nNote (enhancements): Gemini is context/rationale in digest; "
+            "live/sim entries follow TA / precision / your Gemini entry flags unless you enable Gemini-only paths."
+        )
     return line
 
 
@@ -3113,7 +3365,7 @@ def main() -> int:
         _save_balance(symbol, st, st)
         _clear_position(symbol)
         _clear_last_close(symbol)
-        _save_stats(symbol, 0, 0)
+        _save_stats(symbol, 0, 0, 0)
         print(
             f"TA reset on start: balance={st}, position + stats + inter-trade cooldown cleared "
             f"(TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)",
@@ -3133,7 +3385,8 @@ def main() -> int:
         f"gemini_signal_every_digest={_gemini_signal_digest_enabled()} "
         f"gemini_pause_until_flat={_gemini_pause_until_flat_enabled()} "
         f"gemini_single_call={_gemini_single_call_per_cycle_enabled()} "
-        f"(open-every bypasses Gemini entry unless TA_GEMINI_OVERRIDE_OPEN_EVERY=1)",
+        f"(open-every bypasses Gemini entry unless TA_GEMINI_OVERRIDE_OPEN_EVERY=1) "
+        f"strategy_enhancements={_strategy_enhancements_enabled()}",
         flush=True,
     )
     print(
