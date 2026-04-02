@@ -5,6 +5,7 @@ to the subscriber bot) plus optional legacy TELEGRAM_CHAT_ID / config telegram_c
 Optional HTTP(S) proxy for api.telegram.org (same idea as scripts/eth_ta_telegram BINANCE_* proxy):
   TELEGRAM_HTTPS_PROXY=https://user:pass@host:port   # preferred for Telegram only
   If unset, HTTPS_PROXY or BINANCE_HTTPS_PROXY is used when set (shared egress).
+  Or common/proxy_env.py SOCKS5_PROXY_HOST, SOCKS5_PROXY_USER, SOCKS5_PROXY_PASSWORD (+ optional PORT).
   Free PythonAnywhere often cannot reach Telegram/Binance at all; upgrade or run on a VPS with full egress.
 """
 from __future__ import annotations
@@ -16,6 +17,8 @@ import time
 import urllib.parse
 from typing import Any
 
+from common.proxy_env import effective_proxy_url_telegram, requests_proxies_dict
+
 log = logging.getLogger("telegram_broadcast")
 
 try:
@@ -25,16 +28,8 @@ except ImportError:
 
 
 def _telegram_requests_proxies() -> dict[str, str] | None:
-    """Explicit proxies dict for requests (TELEGRAM_HTTPS_PROXY, else HTTPS_PROXY, else BINANCE_HTTPS_PROXY)."""
-    p = (
-        os.environ.get("TELEGRAM_HTTPS_PROXY")
-        or os.environ.get("HTTPS_PROXY")
-        or os.environ.get("BINANCE_HTTPS_PROXY")
-        or ""
-    ).strip()
-    if not p:
-        return None
-    return {"http": p, "https": p}
+    """Explicit proxies dict for requests (see common/proxy_env.py)."""
+    return requests_proxies_dict(effective_proxy_url_telegram())
 
 
 def _is_placeholder(val: Any) -> bool:

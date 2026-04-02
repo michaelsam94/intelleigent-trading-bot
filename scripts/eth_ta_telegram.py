@@ -18,15 +18,22 @@ Env (digest):
   easier at the OS/WireGuard level than “inside Python”). Set one of:
   BINANCE_HTTPS_PROXY=https://user:pass@proxy-host:8443   # or http://... — passed to every API request
   BINANCE_HTTPS_PROXY=socks5h://127.0.0.1:1080            # local SOCKS5 (DNS via proxy); needs PySocks
+  Or split SOCKS5 (Nord / PythonAnywhere-friendly; passwords need no URL escaping in .env):
+  SOCKS5_PROXY_HOST=nl.socks.nordhold.net   # use hostname from Nord Account → SOCKS5 / manual setup
+  SOCKS5_PROXY_PORT=1080
+  SOCKS5_PROXY_USER=...                     # Nord service username (not always same as login)
+  SOCKS5_PROXY_PASSWORD=...
   HTTPS_PROXY=...                                         # standard env; used if BINANCE_HTTPS_PROXY unset
   BINANCE_REQUEST_TIMEOUT_SEC=30                          # optional request timeout (seconds)
   For socks5:// or socks5h:// install PySocks (pip install PySocks or pip install "requests[socks]").
   Smoke test: python scripts/test_outbound_proxy.py
   Using proxies to bypass geo rules may violate Binance terms; US persons should use Binance.US or other compliant venues.
 
-  Telegram sends (common/telegram_broadcast.py): TELEGRAM_HTTPS_PROXY or HTTPS_PROXY or BINANCE_HTTPS_PROXY.
+  Telegram sends (common/telegram_broadcast.py): TELEGRAM_HTTPS_PROXY or HTTPS_PROXY or BINANCE_HTTPS_PROXY
+  or the same SOCKS5_* vars (see common/proxy_env.py).
   Hosts like PythonAnywhere free tier often block api.telegram.org / api.binance.com entirely — use a VPS,
   paid egress, or their documented whitelist; a proxy only helps if the host can reach the proxy.
+  Nord “VPN” on PythonAnywhere: you cannot run OpenVPN/Nord app on shared PA; use Nord SOCKS5 in .env only.
 
   MTF backtest log (append same digest text as Telegram, for scripts/mtf_backtest.py):
   TA_DIGEST_LOG_FILE=         # e.g. data/eth_ta_ethusdc.log (relative to project root); empty = use TA_DIGEST_LOG below
@@ -235,6 +242,7 @@ import talib
 from binance import Client
 from binance.exceptions import BinanceAPIException
 
+from common.proxy_env import effective_proxy_url_binance
 from common.telegram_broadcast import broadcast_telegram_plain, recipient_chat_ids
 from common.gemini_ta import run_gemini_decision, validate_tp_sl
 
@@ -264,7 +272,7 @@ def _klines_to_df(klines: list) -> pd.DataFrame:
 
 def _binance_requests_params() -> dict[str, Any] | None:
     """Optional proxies/timeout for python-binance (VPN egress is usually done outside the process)."""
-    proxy = (os.environ.get("BINANCE_HTTPS_PROXY") or os.environ.get("HTTPS_PROXY") or "").strip()
+    proxy = effective_proxy_url_binance()
     params: dict[str, Any] = {}
     if proxy:
         params["proxies"] = {"http": proxy, "https": proxy}
