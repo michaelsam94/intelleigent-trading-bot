@@ -17,10 +17,12 @@ Env (digest):
   Binance REST (python-binance): optional outbound proxy if your host region is blocked (VPN is usually
   easier at the OS/WireGuard level than “inside Python”). Set one of:
   BINANCE_HTTPS_PROXY=https://user:pass@proxy-host:8443   # or http://... — passed to every API request
+  BINANCE_HTTPS_PROXY=socks5h://127.0.0.1:1080            # local SOCKS5 (DNS via proxy); needs PySocks
   HTTPS_PROXY=...                                         # standard env; used if BINANCE_HTTPS_PROXY unset
   BINANCE_REQUEST_TIMEOUT_SEC=30                          # optional request timeout (seconds)
-  For socks5://... install PySocks (pip install PySocks). Using proxies to bypass geo rules may violate
-  Binance terms; US persons should use Binance.US or other compliant venues.
+  For socks5:// or socks5h:// install PySocks (pip install PySocks or pip install "requests[socks]").
+  Smoke test: python scripts/test_outbound_proxy.py
+  Using proxies to bypass geo rules may violate Binance terms; US persons should use Binance.US or other compliant venues.
 
   Telegram sends (common/telegram_broadcast.py): TELEGRAM_HTTPS_PROXY or HTTPS_PROXY or BINANCE_HTTPS_PROXY.
   Hosts like PythonAnywhere free tier often block api.telegram.org / api.binance.com entirely — use a VPS,
