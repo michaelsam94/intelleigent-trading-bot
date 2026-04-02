@@ -19,7 +19,10 @@ This is a **long-running worker** (loop + Binance + Telegram). It is **not** an 
    - `TELEGRAM_CHAT_ID` (or use subscribers file + volume; see below)
    - `BINANCE_API_KEY` / `BINANCE_API_SECRET` if you use authenticated endpoints or live trading
    - `TA_TRADE_SIM`, `TA_REAL_TRADING`, `TA_REAL_CONFIRM`, `TA_FUTURES_SYMBOL`, etc., as you already use locally
-   - Optional proxy: `SOCKS5_PROXY_*` or `BINANCE_HTTPS_PROXY`
+
+   **Direct outbound (default on Railway):** do **not** set `SOCKS5_PROXY_*`, `BINANCE_HTTPS_PROXY`, or `HTTPS_PROXY` unless you have a specific tunnel. Railway allows normal HTTPS to `api.binance.com` and `api.telegram.org`; SOCKS was mainly for PythonAnywhere.
+
+   If you previously added proxy variables in the Railway dashboard, **delete them** so nothing forces SOCKS timeouts.
 
 3. **Service type**: treat as a **worker** (no public URL required). Railway will keep the process running.
 
