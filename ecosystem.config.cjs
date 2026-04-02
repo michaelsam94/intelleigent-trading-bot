@@ -1,46 +1,15 @@
-/**
- * PM2 ecosystem file. Start both servers:
- *   pm2 start ecosystem.config.cjs
- *
- * From project root. Uses venv Python if present: ./venv/bin/python
- *
- * Env: merge .env from project root (if present) so you can keep secrets out of the shell.
- * Create .env with (do not commit):
- *   TELEGRAM_BOT_TOKEN=...
- *   TELEGRAM_CHAT_ID=...   # optional legacy single chat; subscribers from /start also used
- *   TELEGRAM_REGISTER_SUBSCRIBERS=1   # telegram-poll-debug: save /start to data/telegram_subscribers.json (default on)
- *   TELEGRAM_SUBSCRIBERS_FILE=...     # optional path to subscriber JSON (default data/telegram_subscribers.json)
- *   PIPELINE_ON_TRADE_CLOSE=1         # optional: after each TP/SL close, run pipeline_then_pm2_restart.sh (see docs/PIPELINE_AFTER_TRADE_CLOSE.md)
- *   PIPELINE_CONFIGS=... PM2_RESTART_APPS=...     # optional overrides for that script
- *   BINANCE_API_KEY=... BINANCE_API_SECRET=...  # if not in config
- *   BINANCE_BUTTON_SMTP_EMAIL=... BINANCE_BUTTON_SMTP_PASSWORD=... BINANCE_BUTTON_EMAIL_TO=...  # for btc-game
- *   TA_SYMBOL=ETHUSDC TA_INTERVAL_SEC=300   # eth-ta-telegram: multi-TF TA digest to Telegram
- *   TA_TRADE_SIM=1   or   TA_TRADE_SIM_ENABLED=1   or   TA_TRADE_ENABLED=1   # optional: TA paper trades — docs/ETH_TA_TELEGRAM.md
- *   TA_STARTING_BALANCE=10 TA_LEVERAGE=20
- *   TA_USE_GEMINI=0|1   or   TA_GEMINI_ENABLED=0|1   # optional Gemini for eth-ta-telegram entries (default off); GEMINI_API_KEY=... GEMINI_MODEL=...
- *   TA_OPEN_EVERY_DIGEST=1 TA_DIGEST_5M_ONLY=1 TA_TP_PRICE_PCT=5 TA_SL_PRICE_PCT=3   # optional: one TA-SIM open per digest when flat (5m sign), fixed % TP/SL
- *   TA_RESET_BALANCE_ON_RESTART=1   # optional: reset TA-sim balance on pm2 restart (same as TA_RESET_ON_START)
- * Then: pm2 start ecosystem.config.cjs  or  pm2 restart <app> --update-env
- *
- * Start only btc-game:  pm2 start ecosystem.config.cjs --only btc-game
- * Start only Telegram poll debug:  pm2 start ecosystem.config.cjs --only telegram-poll-debug
- * Start only ETH TA digest:  pm2 start ecosystem.config.cjs --only eth-ta-telegram
- */
 const path = require("path");
 const fs = require("fs");
 const projectRoot = __dirname;
 const venvPython = path.join(projectRoot, "venv", "bin", "python");
 const python = fs.existsSync(venvPython) ? venvPython : "python";
 
-// Start from current process env, then overlay .env from project root (if present)
+// Load .env if exists
 const env = { ...process.env };
 const envPath = path.join(projectRoot, ".env");
 if (fs.existsSync(envPath)) {
   let buf = fs.readFileSync(envPath, "utf8");
-  // Strip UTF-8 BOM so first key is not "\ufeffTA_..."
-  if (buf.charCodeAt(0) === 0xfeff) {
-    buf = buf.slice(1);
-  }
+  if (buf.charCodeAt(0) === 0xfeff) buf = buf.slice(1); // remove BOM
   buf.split("\n").forEach((line) => {
     line = line.replace(/#.*/, "").trim();
     if (!line) return;
@@ -48,12 +17,17 @@ if (fs.existsSync(envPath)) {
     if (eq > 0) {
       const key = line.slice(0, eq).trim();
       let val = line.slice(eq + 1).trim();
-      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"');
-      if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1).replace(/\\'/g, "'");
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
       env[key] = val;
     }
   });
 }
+
+// Ensure venv is used
+env.VIRTUAL_ENV = path.join(projectRoot, "venv");
+env.PATH = path.join(projectRoot, "venv", "bin") + ":" + process.env.PATH;
 
 module.exports = {
   apps: [
@@ -114,7 +88,6 @@ module.exports = {
     {
       name: "telegram-poll-debug",
       script: python,
-      // -u: unbuffered stdout/stderr so PM2 logs show lines immediately
       args: ["-u", "scripts/telegram_poll_debug.py"],
       interpreter: "none",
       cwd: projectRoot,
@@ -125,7 +98,6 @@ module.exports = {
     {
       name: "eth-ta-telegram",
       script: python,
-      // TA digest → Telegram; optional TA_TRADE_SIM=1 paper trades ($10/20x/ATR TP-SL/fees) in data/ta_sim/; TA_ENTRY_ON_SIGNAL_BANNER=1 aligns opens with 📌 BULLISH/BEARISH banner (see docs/ETH_TA_TELEGRAM.md)
       args: ["-u", "scripts/eth_ta_telegram.py"],
       interpreter: "none",
       cwd: projectRoot,
@@ -134,22 +106,19 @@ module.exports = {
       env: {
         ...env,
         PYTHONUNBUFFERED: "1",
-        // Paper trades: non-empty TA_TRADE_SIM wins; else TA_TRADE_SIM_ENABLED or TA_TRADE_ENABLED; else "0"
         TA_TRADE_SIM:
           env.TA_TRADE_SIM != null && String(env.TA_TRADE_SIM).trim() !== ""
             ? env.TA_TRADE_SIM
             : env.TA_TRADE_SIM_ENABLED ?? env.TA_TRADE_ENABLED ?? "0",
-        // Gemini for TA paper entries: default off; set TA_USE_GEMINI=1 or TA_GEMINI_ENABLED=1 in .env (+ GEMINI_API_KEY)
         TA_USE_GEMINI: env.TA_USE_GEMINI ?? env.TA_GEMINI_ENABLED ?? "0",
-        // Match scripts/backtest_ta_signals.py --preset high-win-rate; set TA_PRESET=none in .env to use manual TA_* only
         TA_PRESET: env.TA_PRESET ?? "high-win-rate",
-        // TA-SIM: legacy fallbacks when preset off; grid-tune: scripts/optimize_ta_backtest.py
         TA_SIGNAL_FILTERS: env.TA_SIGNAL_FILTERS ?? "1",
         TA_TP_PRICE_PCT: env.TA_TP_PRICE_PCT ?? "6",
         TA_SL_PRICE_PCT: env.TA_SL_PRICE_PCT ?? "2.5",
         TA_MIN_BARS_BETWEEN_TRADES: env.TA_MIN_BARS_BETWEEN_TRADES ?? "2",
-        // Append each TA digest to data/ for scripts/mtf_backtest.py (override or clear in .env)
         TA_DIGEST_LOG_FILE: env.TA_DIGEST_LOG_FILE ?? "data/eth_ta_ethusdc.log",
+        VIRTUAL_ENV: path.join(projectRoot, "venv"),
+        PATH: path.join(projectRoot, "venv", "bin") + ":" + process.env.PATH,
       },
     },
   ],
