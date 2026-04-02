@@ -6,7 +6,7 @@ This is a **long-running worker** (loop + Binance + Telegram). It is **not** an 
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile.railway-eth-ta` | Slim image with TA-Lib OS packages + minimal pip deps |
+| `Dockerfile.railway-eth-ta` | Builds upstream TA-Lib C lib from tarball (Debian slim has no `libta-lib` apt), then minimal pip deps |
 | `requirements-railway-eth-ta.txt` | Only what `scripts/eth_ta_telegram.py` needs |
 | `railway.toml` | Docker build + start command |
 

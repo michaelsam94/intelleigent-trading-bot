@@ -9,14 +9,26 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# TA-Lib: Debian slim often has no libta-lib* apt packages; build C library from upstream tarball.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ \
-    libta-lib0 \
-    libta-lib-dev \
+    build-essential wget \
+    && ( wget -q -O /tmp/ta-lib.tgz http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz \
+        || wget -q -O /tmp/ta-lib.tgz https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz ) \
+    && tar -xzf /tmp/ta-lib.tgz -C /tmp \
+    && cd /tmp/ta-lib \
+    && ./configure --prefix=/usr \
+    && make \
+    && make install \
+    && ldconfig \
+    && cd / \
+    && rm -rf /tmp/ta-lib /tmp/ta-lib.tgz \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-railway-eth-ta.txt .
-RUN pip install --upgrade pip && pip install -r requirements-railway-eth-ta.txt
+# Pip TA-Lib builds a C extension; compiler is already installed from the TA-Lib C build step above.
+RUN pip install --upgrade pip && pip install -r requirements-railway-eth-ta.txt \
+    && apt-get purge -y --auto-remove build-essential wget \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/ ./scripts/
 COPY common/ ./common/
