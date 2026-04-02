@@ -29,6 +29,8 @@ Env (digest):
   Smoke test: python scripts/test_outbound_proxy.py
   Using proxies to bypass geo rules may violate Binance terms; US persons should use Binance.US or other compliant venues.
 
+  TA_LOG_PUBLIC_IP_ON_START=1   # once at startup: print egress IP via same proxy path as Binance (api.ipify.org); for whitelist/debug on Railway
+
   Telegram sends (common/telegram_broadcast.py): TELEGRAM_HTTPS_PROXY or HTTPS_PROXY or BINANCE_HTTPS_PROXY
   or the same SOCKS5_* vars (see common/proxy_env.py).
   Hosts like PythonAnywhere free tier often block api.telegram.org / api.binance.com entirely — use a VPS,
@@ -247,7 +249,7 @@ import talib
 from binance import Client
 from binance.exceptions import BinanceAPIException
 
-from common.proxy_env import effective_proxy_url_binance
+from common.proxy_env import effective_proxy_url_binance, requests_proxies_dict
 from common.telegram_broadcast import broadcast_telegram_plain, recipient_chat_ids
 from common.gemini_ta import run_gemini_decision, validate_tp_sl
 
@@ -3399,6 +3401,31 @@ def _sleep_until_tick(total_sec: int, stop_evt: threading.Event) -> None:
         stop_evt.wait(timeout=min(1.0, max(0.0, remaining)))
 
 
+def _log_public_egress_ip_if_enabled() -> None:
+    """If TA_LOG_PUBLIC_IP_ON_START=1, GET api.ipify.org using the same proxies as Binance (if any)."""
+    if not _sf_sub("TA_LOG_PUBLIC_IP_ON_START", "0"):
+        return
+    try:
+        import requests
+
+        proxies = requests_proxies_dict(effective_proxy_url_binance())
+        r = requests.get("https://api.ipify.org", timeout=10, proxies=proxies)
+        if r.ok and (ip := r.text.strip()):
+            print(
+                f"eth_ta_telegram: public egress IP (Binance path, for API whitelist): {ip}",
+                flush=True,
+            )
+        else:
+            print(f"TA_LOG_PUBLIC_IP_ON_START: unexpected response HTTP {r.status_code}", flush=True)
+    except Exception as e:
+        print(f"TA_LOG_PUBLIC_IP_ON_START: failed ({e})", flush=True)
+
+
+def _binance_error_is_restricted_location(err: BaseException) -> bool:
+    s = str(err).lower()
+    return "restricted location" in s or ("eligibility" in s and "binance.com" in s and "terms" in s)
+
+
 def main() -> int:
     _load_project_dotenv()
     # Default matches ecosystem.config.cjs eth-ta-telegram; set TA_PRESET=none to use only explicit TA_* from .env
@@ -3462,6 +3489,7 @@ def main() -> int:
         f"TA_TRADE_ENABLED={repr(os.environ.get('TA_TRADE_ENABLED'))}",
         flush=True,
     )
+    _log_public_egress_ip_if_enabled()
     if not trade_sim and not trade_live:
         print(
             "TA_TRADE_SIM is off — no TA-SIM open/close messages. "
@@ -3579,8 +3607,23 @@ def main() -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+            elif _binance_error_is_restricted_location(e):
+                print(
+                    "Binance ‘restricted location’ is a geo/compliance block on Binance.com from this datacenter "
+                    "(e.g. US or other ineligible region). It is NOT fixed by IP whitelist. Options: deploy in a "
+                    "non-restricted region/VPS, use Binance.US if you are a US user, or consult Binance terms/support.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr, flush=True)
+            if _binance_error_is_restricted_location(e):
+                print(
+                    "Binance ‘restricted location’ is a geo/compliance block on Binance.com from this datacenter. "
+                    "IP whitelist will not help. Change hosting region/venue or use a compliant exchange API for your jurisdiction.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if stop_evt.is_set():
             break
         _sleep_until_tick(interval_sec, stop_evt)

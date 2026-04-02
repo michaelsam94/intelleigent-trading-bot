@@ -29,11 +29,16 @@ This is a **long-running worker** (loop + Binance + Telegram). It is **not** an 
    **Futures:** enable **Futures** permission on the key if `TA_REAL_TRADING=1` / `futures_klines`.  
    **Digest-only without your key’s IP:** you can use **no** `BINANCE_API_KEY` / `BINANCE_API_SECRET` for public klines only — but then **disable** `TA_REAL_TRADING` (live orders need a whitelisted key).
 
-4. **Service type**: treat as a **worker** (no public URL required). Railway will keep the process running.
+   **Log egress IP in app logs:** set `TA_LOG_PUBLIC_IP_ON_START=1`. On startup the worker prints the public IP seen from the same outbound path as Binance (uses your Binance proxy env if set). Use with `-2015` debugging; it does **not** fix geo blocks.
 
-5. **Persistence** (optional): default TA-SIM state lives under `data/ta_sim/`. Without a volume, **redeploys reset** that data. Add a **volume** mounted at **`/app/data`** if you want `position.json`, `balance.json`, and `data/telegram_subscribers.json` to survive.
+4. **Binance “restricted location” / Eligibility**  
+   If the error mentions **restricted location** or **b. Eligibility** in Binance terms, Binance.com is **blocking the datacenter region** (common for some US cloud IPs). **IP whitelist does not fix this.** You need a host in an allowed jurisdiction, [Binance.US](https://www.binance.us/) where applicable, or a different compliant venue — not “add IP in Binance.”
 
-6. **Logs**: stdout/stderr appear in Railway’s **Deployments → Logs**.
+5. **Service type**: treat as a **worker** (no public URL required). Railway will keep the process running.
+
+6. **Persistence** (optional): default TA-SIM state lives under `data/ta_sim/`. Without a volume, **redeploys reset** that data. Add a **volume** mounted at **`/app/data`** if you want `position.json`, `balance.json`, and `data/telegram_subscribers.json` to survive.
+
+7. **Logs**: stdout/stderr appear in Railway’s **Deployments → Logs**.
 
 ## Local Docker test
 
