@@ -1,0 +1,19 @@
+# Used by Dockerfile.railway-eth-ta (and any future root Dockerfile).
+.git
+.github
+.cursor
+venv
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+.env
+.env.*
+*.log
+node_modules
+terminals
+outputs
+models
+*.parquet
+*.pkl
+*.h5

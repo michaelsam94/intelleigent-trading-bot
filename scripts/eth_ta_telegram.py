@@ -35,6 +35,10 @@ Env (digest):
   paid egress, or their documented whitelist; a proxy only helps if the host can reach the proxy.
   Nord “VPN” on PythonAnywhere: you cannot run OpenVPN/Nord app on shared PA; use Nord SOCKS5 in .env only.
 
+  Railway (PaaS, no VPS): use Dockerfile.railway-eth-ta + railway.toml at repo root; set all secrets as
+  Railway Variables (no .env in image). Optional volume mount on /app/data for TA-SIM state + telegram_subscribers.json.
+  Requirements: requirements-railway-eth-ta.txt (see deploy/RAILWAY_ETH_TA.md).
+
   MTF backtest log (append same digest text as Telegram, for scripts/mtf_backtest.py):
   TA_DIGEST_LOG_FILE=         # e.g. data/eth_ta_ethusdc.log (relative to project root); empty = use TA_DIGEST_LOG below
   TA_DIGEST_LOG=0             # if 1 and TA_DIGEST_LOG_FILE unset: data/eth_ta_<SYMBOL>.log
@@ -127,6 +131,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -3386,6 +3391,14 @@ def _build_gemini_signal_block(
     return line
 
 
+def _sleep_until_tick(total_sec: int, stop_evt: threading.Event) -> None:
+    """Sleep up to total_sec seconds in 1s slices so SIGTERM/SIGINT can stop the loop promptly (Railway deploys)."""
+    deadline = time.monotonic() + max(0, float(total_sec))
+    while time.monotonic() < deadline and not stop_evt.is_set():
+        remaining = deadline - time.monotonic()
+        stop_evt.wait(timeout=min(1.0, max(0.0, remaining)))
+
+
 def main() -> int:
     _load_project_dotenv()
     # Default matches ecosystem.config.cjs eth-ta-telegram; set TA_PRESET=none to use only explicit TA_* from .env
@@ -3484,7 +3497,16 @@ def main() -> int:
         except Exception as e:
             print(f"Startup Telegram failed: {e}", file=sys.stderr, flush=True)
 
-    while True:
+    stop_evt = threading.Event()
+
+    def _handle_stop(signum: int, _frame: object | None) -> None:
+        print(f"eth_ta_telegram: signal {signum} — stopping after current cycle", flush=True)
+        stop_evt.set()
+
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+
+    while not stop_evt.is_set():
         try:
             snap = build_snapshot(symbol, limit)
             msg = snap.text
@@ -3548,7 +3570,12 @@ def main() -> int:
                 print(f"{datetime.now(timezone.utc).isoformat()} digest skipped (no Telegram)", flush=True)
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr, flush=True)
-        time.sleep(interval_sec)
+        if stop_evt.is_set():
+            break
+        _sleep_until_tick(interval_sec, stop_evt)
+
+    print("eth_ta_telegram: shutdown complete", flush=True)
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+# Deploy eth_ta_telegram as a long-running worker (not a public HTTP service).
+# Railway dashboard: New Project → Deploy from GitHub → set same root; add Variables (see deploy/RAILWAY_ETH_TA.md).
+# Optional: attach a volume mounted at /app/data for TA-SIM + telegram_subscribers.json persistence.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.railway-eth-ta"
+
+[deploy]
+startCommand = "python -u scripts/eth_ta_telegram.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

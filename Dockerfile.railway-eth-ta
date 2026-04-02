@@ -1,0 +1,26 @@
+# Railway / container image for scripts/eth_ta_telegram.py only (no full ML stack).
+# Build: docker build -f Dockerfile.railway-eth-ta -t eth-ta-telegram .
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ \
+    libta-lib0 \
+    libta-lib-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-railway-eth-ta.txt .
+RUN pip install --upgrade pip && pip install -r requirements-railway-eth-ta.txt
+
+COPY scripts/ ./scripts/
+COPY common/ ./common/
+
+RUN mkdir -p data/ta_sim
+
+CMD ["python", "-u", "scripts/eth_ta_telegram.py"]
