@@ -24,11 +24,16 @@ This is a **long-running worker** (loop + Binance + Telegram). It is **not** an 
 
    If you previously added proxy variables in the Railway dashboard, **delete them** so nothing forces SOCKS timeouts.
 
-3. **Service type**: treat as a **worker** (no public URL required). Railway will keep the process running.
+3. **Binance API key and IP (`-2015`)**  
+   If logs show `Invalid API-key, IP, or permissions` with a **request ip** (e.g. `34.x.x.x`), your key is **IP-restricted** and Railway’s outbound IP is not on the list. Fix in [Binance API Management](https://www.binance.com/en/my/settings/api-management): add that IP to the key’s whitelist, or relax restriction (only if you accept the risk). Railway IPs can **change** when you redeploy; for stable IP, use your hoster’s static-egress option or a small VPS with a fixed IP.  
+   **Futures:** enable **Futures** permission on the key if `TA_REAL_TRADING=1` / `futures_klines`.  
+   **Digest-only without your key’s IP:** you can use **no** `BINANCE_API_KEY` / `BINANCE_API_SECRET` for public klines only — but then **disable** `TA_REAL_TRADING` (live orders need a whitelisted key).
 
-4. **Persistence** (optional): default TA-SIM state lives under `data/ta_sim/`. Without a volume, **redeploys reset** that data. Add a **volume** mounted at **`/app/data`** if you want `position.json`, `balance.json`, and `data/telegram_subscribers.json` to survive.
+4. **Service type**: treat as a **worker** (no public URL required). Railway will keep the process running.
 
-5. **Logs**: stdout/stderr appear in Railway’s **Deployments → Logs**.
+5. **Persistence** (optional): default TA-SIM state lives under `data/ta_sim/`. Without a volume, **redeploys reset** that data. Add a **volume** mounted at **`/app/data`** if you want `position.json`, `balance.json`, and `data/telegram_subscribers.json` to survive.
+
+6. **Logs**: stdout/stderr appear in Railway’s **Deployments → Logs**.
 
 ## Local Docker test
 

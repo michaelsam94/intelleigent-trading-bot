@@ -3568,6 +3568,17 @@ def main() -> int:
                 print(f"{datetime.now(timezone.utc).isoformat()} digest sent to {n} chat(s)", flush=True)
             elif trade_sim:
                 print(f"{datetime.now(timezone.utc).isoformat()} digest skipped (no Telegram)", flush=True)
+        except BinanceAPIException as e:
+            print(f"Error: {e}", file=sys.stderr, flush=True)
+            if e.code == -2015:
+                print(
+                    "Binance -2015: this host’s IP is not allowed for your API key. "
+                    "In Binance → API Management, add the “request ip” from the error to the key’s IP whitelist, "
+                    "or use an unrestricted key (weaker security). Railway/container IPs often change on redeploy "
+                    "unless you use static egress — digest and futures calls will fail every cycle until fixed.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr, flush=True)
         if stop_evt.is_set():
