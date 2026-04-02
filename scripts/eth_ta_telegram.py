@@ -14,6 +14,14 @@ Env (digest):
   TA_SIGNAL_ALERTS=1
   TELEGRAM_BOT_TOKEN=...
 
+  Binance REST (python-binance): optional outbound proxy if your host region is blocked (VPN is usually
+  easier at the OS/WireGuard level than “inside Python”). Set one of:
+  BINANCE_HTTPS_PROXY=https://user:pass@proxy-host:8443   # or http://... — passed to every API request
+  HTTPS_PROXY=...                                         # standard env; used if BINANCE_HTTPS_PROXY unset
+  BINANCE_REQUEST_TIMEOUT_SEC=30                          # optional request timeout (seconds)
+  For socks5://... install PySocks (pip install PySocks). Using proxies to bypass geo rules may violate
+  Binance terms; US persons should use Binance.US or other compliant venues.
+
   MTF backtest log (append same digest text as Telegram, for scripts/mtf_backtest.py):
   TA_DIGEST_LOG_FILE=         # e.g. data/eth_ta_ethusdc.log (relative to project root); empty = use TA_DIGEST_LOG below
   TA_DIGEST_LOG=0             # if 1 and TA_DIGEST_LOG_FILE unset: data/eth_ta_<SYMBOL>.log
@@ -248,12 +256,31 @@ def _klines_to_df(klines: list) -> pd.DataFrame:
     return df
 
 
+def _binance_requests_params() -> dict[str, Any] | None:
+    """Optional proxies/timeout for python-binance (VPN egress is usually done outside the process)."""
+    proxy = (os.environ.get("BINANCE_HTTPS_PROXY") or os.environ.get("HTTPS_PROXY") or "").strip()
+    params: dict[str, Any] = {}
+    if proxy:
+        params["proxies"] = {"http": proxy, "https": proxy}
+    try:
+        t = float(os.environ.get("BINANCE_REQUEST_TIMEOUT_SEC", "30") or 30)
+        if t > 0:
+            params["timeout"] = t
+    except ValueError:
+        params["timeout"] = 30.0
+    return params if params else None
+
+
 def _client() -> Client:
     k = os.environ.get("BINANCE_API_KEY", "").strip()
     s = os.environ.get("BINANCE_API_SECRET", "").strip()
+    req = _binance_requests_params()
+    kw: dict[str, Any] = {}
+    if req is not None:
+        kw["requests_params"] = req
     if k and s:
-        return Client(k, s)
-    return Client("", "")
+        return Client(k, s, **kw)
+    return Client("", "", **kw)
 
 
 def _last(x: np.ndarray | None) -> float | None:
@@ -2835,6 +2862,7 @@ def process_ta_trade_sim(
                 exit_price = sl_price
 
         if hit_tp or hit_sl:
+            win = hit_tp
             if side == "LONG":
                 profit = exit_price - entry
             else:
@@ -2858,7 +2886,6 @@ def process_ta_trade_sim(
                 f.write(t_line)
 
             res = "TP" if hit_tp else "SL"
-            win = hit_tp
             emoji = "✅" if win else "❌"
             st0 = _load_stats(symbol)
             prev_ls = int(st0.get("loss_streak", 0))
