@@ -1,4 +1,4 @@
-# Used by Dockerfile.railway-eth-ta (and any future root Dockerfile).
+# Used by Dockerfile / Dockerfile.railway-eth-ta (same image).
 .git
 .github
 .cursor
