@@ -1,6 +1,11 @@
 """
 Telegram broadcast: multiple chat_ids from data/telegram_subscribers.json (filled when users send /start
 to the subscriber bot) plus optional legacy TELEGRAM_CHAT_ID / config telegram_chat_id.
+
+Optional HTTP(S) proxy for api.telegram.org (same idea as scripts/eth_ta_telegram BINANCE_* proxy):
+  TELEGRAM_HTTPS_PROXY=https://user:pass@host:port   # preferred for Telegram only
+  If unset, HTTPS_PROXY or BINANCE_HTTPS_PROXY is used when set (shared egress).
+  Free PythonAnywhere often cannot reach Telegram/Binance at all; upgrade or run on a VPS with full egress.
 """
 from __future__ import annotations
 
@@ -17,6 +22,19 @@ try:
     import fcntl
 except ImportError:
     fcntl = None  # type: ignore
+
+
+def _telegram_requests_proxies() -> dict[str, str] | None:
+    """Explicit proxies dict for requests (TELEGRAM_HTTPS_PROXY, else HTTPS_PROXY, else BINANCE_HTTPS_PROXY)."""
+    p = (
+        os.environ.get("TELEGRAM_HTTPS_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("BINANCE_HTTPS_PROXY")
+        or ""
+    ).strip()
+    if not p:
+        return None
+    return {"http": p, "https": p}
 
 
 def _is_placeholder(val: Any) -> bool:
@@ -182,7 +200,7 @@ def broadcast_telegram_markdown(bot_token: str, text: str, config: dict | None =
                 + "&parse_mode=markdown&text="
                 + urllib.parse.quote(text)
             )
-            r = requests.get(url, timeout=12)
+            r = requests.get(url, timeout=12, proxies=_telegram_requests_proxies())
             body = r.json() if r.content else {}
             if body.get("ok"):
                 ok += 1
@@ -219,7 +237,7 @@ def broadcast_telegram_plain(bot_token: str, text: str, config: dict | None = No
                 + "&text="
                 + urllib.parse.quote(text)
             )
-            r = requests.get(url, timeout=12)
+            r = requests.get(url, timeout=12, proxies=_telegram_requests_proxies())
             body = r.json() if r.content else {}
             if body.get("ok"):
                 ok += 1

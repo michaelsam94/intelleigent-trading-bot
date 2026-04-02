@@ -22,6 +22,10 @@ Env (digest):
   For socks5://... install PySocks (pip install PySocks). Using proxies to bypass geo rules may violate
   Binance terms; US persons should use Binance.US or other compliant venues.
 
+  Telegram sends (common/telegram_broadcast.py): TELEGRAM_HTTPS_PROXY or HTTPS_PROXY or BINANCE_HTTPS_PROXY.
+  Hosts like PythonAnywhere free tier often block api.telegram.org / api.binance.com entirely — use a VPS,
+  paid egress, or their documented whitelist; a proxy only helps if the host can reach the proxy.
+
   MTF backtest log (append same digest text as Telegram, for scripts/mtf_backtest.py):
   TA_DIGEST_LOG_FILE=         # e.g. data/eth_ta_ethusdc.log (relative to project root); empty = use TA_DIGEST_LOG below
   TA_DIGEST_LOG=0             # if 1 and TA_DIGEST_LOG_FILE unset: data/eth_ta_<SYMBOL>.log
