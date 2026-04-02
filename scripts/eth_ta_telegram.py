@@ -29,7 +29,8 @@ Env (digest):
   Smoke test: python scripts/test_outbound_proxy.py
   Using proxies to bypass geo rules may violate Binance terms; US persons should use Binance.US or other compliant venues.
 
-  TA_LOG_PUBLIC_IP_ON_START=1   # once at startup: print egress IP via same proxy path as Binance (api.ipify.org); for whitelist/debug on Railway
+  TA_LOG_PUBLIC_IP_ON_START=1   # once at startup: print egress IP (api.ipify.org, same proxy path as Binance)
+  On Binance “restricted location” errors, egress IP is always logged automatically (no env flag).
 
   Telegram sends (common/telegram_broadcast.py): TELEGRAM_HTTPS_PROXY or HTTPS_PROXY or BINANCE_HTTPS_PROXY
   or the same SOCKS5_* vars (see common/proxy_env.py).
@@ -3401,24 +3402,49 @@ def _sleep_until_tick(total_sec: int, stop_evt: threading.Event) -> None:
         stop_evt.wait(timeout=min(1.0, max(0.0, remaining)))
 
 
-def _log_public_egress_ip_if_enabled() -> None:
-    """If TA_LOG_PUBLIC_IP_ON_START=1, GET api.ipify.org using the same proxies as Binance (if any)."""
-    if not _sf_sub("TA_LOG_PUBLIC_IP_ON_START", "0"):
-        return
+def _fetch_public_egress_ip() -> str | None:
+    """Public IPv4 seen from this host using the same HTTP proxy path as Binance (if any)."""
     try:
         import requests
 
         proxies = requests_proxies_dict(effective_proxy_url_binance())
         r = requests.get("https://api.ipify.org", timeout=10, proxies=proxies)
-        if r.ok and (ip := r.text.strip()):
-            print(
-                f"eth_ta_telegram: public egress IP (Binance path, for API whitelist): {ip}",
-                flush=True,
-            )
-        else:
-            print(f"TA_LOG_PUBLIC_IP_ON_START: unexpected response HTTP {r.status_code}", flush=True)
-    except Exception as e:
-        print(f"TA_LOG_PUBLIC_IP_ON_START: failed ({e})", flush=True)
+        if r.ok:
+            t = (r.text or "").strip()
+            return t or None
+    except Exception:
+        pass
+    return None
+
+
+def _log_public_egress_ip_if_enabled() -> None:
+    """If TA_LOG_PUBLIC_IP_ON_START=1, print egress IP once at startup."""
+    if not _sf_sub("TA_LOG_PUBLIC_IP_ON_START", "0"):
+        return
+    ip = _fetch_public_egress_ip()
+    if ip:
+        print(
+            f"eth_ta_telegram: public egress IP (Binance path, for API whitelist): {ip}",
+            flush=True,
+        )
+    else:
+        print("TA_LOG_PUBLIC_IP_ON_START: could not fetch public IP", flush=True)
+
+
+def _log_public_egress_ip_on_binance_geo_block() -> None:
+    """Always log egress IP when Binance reports restricted location (for support / debugging)."""
+    ip = _fetch_public_egress_ip()
+    if ip:
+        print(
+            f"eth_ta_telegram: public egress IP at Binance geo error (same path as API calls): {ip}",
+            flush=True,
+        )
+    else:
+        print(
+            "eth_ta_telegram: could not fetch public egress IP after geo error "
+            "(outbound to https://api.ipify.org blocked?)",
+            flush=True,
+        )
 
 
 def _binance_error_is_restricted_location(err: BaseException) -> bool:
@@ -3615,6 +3641,7 @@ def main() -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+                _log_public_egress_ip_on_binance_geo_block()
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr, flush=True)
             if _binance_error_is_restricted_location(e):
@@ -3624,6 +3651,7 @@ def main() -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+                _log_public_egress_ip_on_binance_geo_block()
         if stop_evt.is_set():
             break
         _sleep_until_tick(interval_sec, stop_evt)
