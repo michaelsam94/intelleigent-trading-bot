@@ -13,4 +13,6 @@ restartPolicyMaxRetries = 10
 # Deploy region (pick ONE key). Identifiers: https://docs.railway.com/reference/deployment-regions
 #   europe-west4-drams3a = EU West (Amsterdam)  |  asia-southeast1-eqsg3a = Singapore
 #   us-west2 = US West  |  us-east4-eqdc4a = US East
+# Force EU only: a single key here pins all replicas to Amsterdam (Railway overrides dashboard region on deploy).
+# Public egress IPs (e.g. 162.220.x.x, AS400940) may still show "US" in some GeoIP DBs; Binance uses its own geo rules.
 multiRegionConfig = { "europe-west4-drams3a" = { numReplicas = 1 } }
