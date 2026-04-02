@@ -1,0 +1,23 @@
+# fly.toml — intelleigent-trading-bot-sjkfow (eth_ta_telegram worker, Amsterdam).
+# Aligned with Fly-generated settings, but:
+# - [build] uses Docker (Dockerfile.railway-eth-ta), not Paketo. Paketo + requirements.txt
+#   pulls xgboost and fails (cmake missing).
+# - No [http_service] / PORT: this process does not listen on HTTP; only outbound Telegram/Binance.
+#   If you add a public health endpoint later, restore http_service + a listener on internal_port.
+#
+# https://fly.io/docs/reference/configuration/
+
+app = 'intelleigent-trading-bot-sjkfow'
+primary_region = 'ams'
+
+[build]
+  dockerfile = 'Dockerfile.railway-eth-ta'
+
+kill_signal = 'SIGTERM'
+kill_timeout = 120
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256

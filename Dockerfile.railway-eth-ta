@@ -1,4 +1,4 @@
-# Railway / container image for scripts/eth_ta_telegram.py only (no full ML stack).
+# Container image for scripts/eth_ta_telegram.py only (Railway, Fly.io, etc.; no full ML stack).
 # Build: docker build -f Dockerfile.railway-eth-ta -t eth-ta-telegram .
 FROM python:3.11-slim-bookworm
 
