@@ -90,9 +90,16 @@ def _print_connectivity_hint(exc: BaseException, proxy_url: str) -> None:
                 )
             else:
                 print(
-                    "Hint: connection refused to remote SOCKS host:port — check SOCKS5_PROXY_HOST/PORT, "
-                    "firewall, and that you use Nord’s SOCKS5 server from your account (OpenVPN hostname "
-                    "like eg2.nordvpn.com is usually not the SOCKS endpoint).",
+                    "Hint: connection refused reaching the SOCKS server (TCP to host:1080 failed before auth).\n"
+                    "  • On PythonAnywhere: many plans block outbound TCP to arbitrary hosts/ports (including "
+                    "Nord SOCKS on 1080). Your .env can be correct and still fail here. Check their outgoing "
+                    "access docs; you may need a paid tier with full internet, or run this bot on a VPS/home PC.\n"
+                    "  • Sanity check from this same shell:  "
+                    "timeout 5 bash -c 'echo >/dev/tcp/HOST/1080' 2>/dev/null && echo open || echo closed\n"
+                    "    (replace HOST with your SOCKS5_PROXY_HOST), or from another machine: "
+                    "nc -zv amsterdam.nl.socks.nordhold.net 1080\n"
+                    "  • Try another region hostname from Nord’s SOCKS list if one POP is down.\n"
+                    "  • OpenVPN server names (eg2.nordvpn.com) are not SOCKS endpoints — use *.socks.nordhold.net.",
                     file=sys.stderr,
                     flush=True,
                 )

@@ -13,7 +13,9 @@ SOCKS5 as separate vars (avoids URL-encoding long passwords in one string; works
 Built URL: socks5h://USER:PASS@HOST:PORT  (DNS via proxy; requires PySocks)
 
 PythonAnywhere: OpenVPN/full VPN is not supported on shared hosting; use SOCKS5 from Python only.
-Free tier may still block outbound to Binance/Telegram/Nord — paid egress may be required.
+Many PA plans block outbound TCP to external port 1080 (Nord SOCKS) even when .env is correct —
+connection refused to *.socks.nordhold.net is often the hoster, not your credentials. Use full outgoing
+internet, or run the bot on a VPS/home PC.
 """
 from __future__ import annotations
 
