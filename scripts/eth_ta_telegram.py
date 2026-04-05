@@ -1016,6 +1016,125 @@ def _supertrend_signal(df: pd.DataFrame, period: int = 10, multiplier: float = 3
     return int(direction[-1]) if n > period else 0
 
 
+def _choppiness_index(df: pd.DataFrame, period: int = 14) -> float | None:
+    """
+    Choppiness Index: measures how trending vs ranging the market is.
+    Range 0-100. > 61.8 = choppy/ranging (signals unreliable). < 38.2 = strong trend.
+    Formula: 100 × log10(Σ ATR(1, i) / (HH - LL)) / log10(period)
+    """
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    close = df["close"].values.astype(float)
+    n = len(close)
+    if n < period + 2:
+        return None
+    w_high = high[-period:]
+    w_low = low[-period:]
+    w_close = close[-(period + 1):]
+    hh = float(np.max(w_high))
+    ll = float(np.min(w_low))
+    if hh - ll < 1e-9:
+        return None
+    true_ranges = []
+    for i in range(1, period + 1):
+        idx = n - period - 1 + i
+        tr = max(
+            float(high[idx]) - float(low[idx]),
+            abs(float(high[idx]) - float(close[idx - 1])),
+            abs(float(low[idx]) - float(close[idx - 1])),
+        )
+        true_ranges.append(tr)
+    atr_sum = sum(true_ranges)
+    if atr_sum <= 0:
+        return None
+    import math
+    ci = 100.0 * math.log10(atr_sum / (hh - ll)) / math.log10(period)
+    return float(np.clip(ci, 0.0, 100.0))
+
+
+def _ema_ribbon_vote(close: np.ndarray) -> tuple[int, str]:
+    """
+    EMA ribbon alignment signal using EMA 8/13/21/34/55.
+    All descending + price below EMA8 = bearish (-1).
+    All ascending + price above EMA8 = bullish (+1).
+    Otherwise neutral (0).
+    More robust than single MA cross — requires ALL EMAs to agree.
+    """
+    n = len(close)
+    periods = [8, 13, 21, 34, 55]
+    if n < 60:
+        return 0, "Ribbon: N/A"
+    emas = {}
+    for p in periods:
+        e = _last(talib.EMA(close, timeperiod=p))
+        if e is None or np.isnan(e):
+            return 0, "Ribbon: N/A"
+        emas[p] = e
+    cur = float(close[-1])
+    vals = [emas[p] for p in periods]
+    if all(vals[i] > vals[i + 1] for i in range(len(vals) - 1)) and cur > vals[0]:
+        return 1, f"Ribbon: ↑ aligned bullish (8>{emas[8]:.2f})"
+    if all(vals[i] < vals[i + 1] for i in range(len(vals) - 1)) and cur < vals[0]:
+        return -1, f"Ribbon: ↓ aligned bearish (8<{emas[8]:.2f})"
+    gaps = [abs(vals[i] - vals[i + 1]) / max(vals[i + 1], 1e-9) for i in range(len(vals) - 1)]
+    avg_gap = float(np.mean(gaps)) * 100
+    return 0, f"Ribbon: mixed (avg gap {avg_gap:.2f}%)"
+
+
+def _smoothed_rsi_vote(close: np.ndarray, period: int = 3) -> tuple[int, str]:
+    """
+    RSI(14) smoothed over `period` bars to remove single-bar noise.
+    Returns direction of the smoothed RSI trend: +1 rising, -1 falling, 0 flat.
+    Extra weight when crossing key levels (50 cross is significant trend signal).
+    """
+    n = len(close)
+    if n < 30:
+        return 0, "RSI-smooth: N/A"
+    rsi_arr = talib.RSI(close, timeperiod=14)
+    valid = rsi_arr[~np.isnan(rsi_arr)]
+    if len(valid) < period + 2:
+        return 0, "RSI-smooth: N/A"
+    rsi_recent = rsi_arr[-period - 2:]
+    rsi_ema = talib.EMA(rsi_recent, timeperiod=period)
+    cur_rsi = _last(rsi_ema)
+    prev_rsi = rsi_ema[-(period + 1)] if len(rsi_ema) > period else None
+    if cur_rsi is None or prev_rsi is None or np.isnan(prev_rsi):
+        return 0, "RSI-smooth: N/A"
+    raw_rsi = _last(rsi_arr)
+    delta = cur_rsi - prev_rsi
+    if delta > 1.0 and cur_rsi < 60:
+        return 1, f"RSI-smooth: ↑{cur_rsi:.1f} rising (raw {raw_rsi:.1f})"
+    if delta < -1.0 and cur_rsi > 40:
+        return -1, f"RSI-smooth: ↓{cur_rsi:.1f} falling (raw {raw_rsi:.1f})"
+    return 0, f"RSI-smooth: flat {cur_rsi:.1f}"
+
+
+def _macd_momentum_vote(close: np.ndarray) -> tuple[int, str]:
+    """
+    MACD histogram momentum: requires histogram to be positive/negative for 2+ consecutive bars.
+    Single-bar flips are rejected as noise — common in choppy 5m data.
+    """
+    n = len(close)
+    if n < 35:
+        return 0, "MACD-mom: N/A"
+    _, _, hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+    valid = [h for h in hist[-4:] if not np.isnan(h)]
+    if len(valid) < 3:
+        return 0, "MACD-mom: N/A"
+    h0, h1, h2 = float(valid[-1]), float(valid[-2]), float(valid[-3])
+    if h0 > 0 and h1 > 0:
+        trend = "growing" if h0 > h1 else "fading"
+        return 1, f"MACD-mom: ↑ bullish 2 bars ({trend})"
+    if h0 < 0 and h1 < 0:
+        trend = "growing" if abs(h0) > abs(h1) else "fading"
+        return -1, f"MACD-mom: ↓ bearish 2 bars ({trend})"
+    if h2 > 0 and h1 > 0 and h0 < 0:
+        return -1, "MACD-mom: fresh bearish flip"
+    if h2 < 0 and h1 < 0 and h0 > 0:
+        return 1, "MACD-mom: fresh bullish flip"
+    return 0, f"MACD-mom: conflicted h={h0:.5f}"
+
+
 @dataclass
 class PrecisionSignal:
     action: str          # "LONG", "SHORT", "HOLD"
@@ -1029,69 +1148,222 @@ class PrecisionSignal:
 
 def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     """
-    Aggregates all indicator signals on 5m data into a single high-accuracy signal with confidence.
-    Weights: core TA score (normalized) 40%, candlestick 15%, divergence 20%, supertrend 15%, volume 10%.
+    Noise-resistant precision signal aggregator for 5m ETH/crypto data.
+
+    Key anti-noise features:
+    1. ADX regime gate — 0.3× penalty when ADX < 18 (ranging market), 0.65× when ADX < 25.
+    2. Choppiness Index gate — 0.45× penalty when CI > 61.8 (golden ratio choppy threshold).
+    3. Signal layer vote system — requires >= TA_PRECISION_MIN_VOTES (default 3) agreeing layers.
+    4. Conflict dampening — heavy penalty when >= 2 layers are bullish AND >= 2 are bearish.
+    5. Smoothed indicators — RSI and MACD use multi-bar smoothing, not single-bar readings.
+    6. EMA ribbon — requires ALL 5 EMAs (8/13/21/34/55) to be aligned, not just one cross.
+    7. MACD momentum — requires 2 consecutive bars in same direction, rejects single-bar flips.
+    8. Volatility spike check — high ATR spike reduces confidence (erratic, unpredictable bars).
+    9. Volume quality filter — volume surge on small-body candle is discarded as noise.
+
+    Layers and weights:
+    - Core TA score (35%) — MA alignment, RSI, Stoch, ADX/DI, CCI, BB, Ichimoku, StochRSI
+    - EMA ribbon (15%)    — 8/13/21/34/55 full alignment (new, noise-resistant)
+    - Divergence (15%)    — RSI + MACD divergence
+    - Supertrend (12%)    — ATR-based Supertrend direction
+    - MACD momentum (10%) — requires 2-bar confirmation, no single-flip noise
+    - Smoothed RSI (8%)   — EMA-smoothed RSI trend direction
+    - Volume quality (5%) — surge only on large-body candles
+    Total weights = 100%
+
+    Regime/noise multipliers applied after weighting:
+    - ADX < 18  → ×0.30 (strong ranging penalty)
+    - ADX 18-25 → ×0.65 (weak trend penalty)
+    - CI > 61.8 → ×0.45 (choppiness penalty, stacks with ADX)
+    - Volatility spike (ATR > 2.5×20bar avg) → ×0.70
+    - Layer conflict (≥2 bull AND ≥2 bear) → ×0.50
+    - Min vote gate: fewer than TA_PRECISION_MIN_VOTES agreeing layers → force HOLD
     """
     if df_5m is None or len(df_5m) < 60:
         return PrecisionSignal("HOLD", 0, 0.0, ["Insufficient data"], "", [], 0)
 
+    close = df_5m["close"].values.astype(float)
+    high = df_5m["high"].values.astype(float)
+    low = df_5m["low"].values.astype(float)
     reasons: list[str] = []
+    layer_votes: list[int] = []   # +1 = bullish layer, -1 = bearish, 0 = neutral
 
-    # 1. Core TA score (normalized to -1..+1)
+    min_votes = int(os.environ.get("TA_PRECISION_MIN_VOTES", "3"))
+
+    # ── Layer 1: Core TA score (35%) ──────────────────────────────────────
     ta_score, _ = _analyze_ohlcv(df_5m)
     ta_norm = float(np.clip(ta_score / 4.0, -1.0, 1.0))
-    weighted_score = ta_norm * 0.40
+    weighted_score = ta_norm * 0.35
+    layer_votes.append(1 if ta_score >= 1.0 else (-1 if ta_score <= -1.0 else 0))
 
-    # 2. Candlestick patterns
-    candle_score, patterns = _candlestick_signal(df_5m)
-    candle_norm = float(np.clip(candle_score / 1.5, -1.0, 1.0))
-    weighted_score += candle_norm * 0.15
-    if patterns:
-        reasons.append(f"Patterns: {', '.join(patterns)}")
+    # ── Layer 2: EMA ribbon (15%) ──────────────────────────────────────────
+    ribbon_vote, ribbon_note = _ema_ribbon_vote(close)
+    weighted_score += float(ribbon_vote) * 0.15
+    layer_votes.append(ribbon_vote)
+    if ribbon_vote != 0:
+        reasons.append(ribbon_note)
 
-    # 3. Divergence
+    # ── Layer 3: Divergence (15%) ─────────────────────────────────────────
     rsi_div, macd_div, div_note = _detect_divergence(df_5m)
     div_score = float(np.clip((rsi_div + macd_div) / 2.0, -1.0, 1.0))
-    weighted_score += div_score * 0.20
+    weighted_score += div_score * 0.15
+    layer_votes.append(1 if div_score > 0 else (-1 if div_score < 0 else 0))
     if rsi_div != 0 or macd_div != 0:
         reasons.append(div_note)
 
-    # 4. Supertrend
+    # ── Layer 4: Supertrend (12%) ─────────────────────────────────────────
     st_dir = _supertrend_signal(df_5m)
-    weighted_score += float(st_dir) * 0.15
+    weighted_score += float(st_dir) * 0.12
+    layer_votes.append(st_dir)
     if st_dir == 1:
         reasons.append("Supertrend: bullish")
     elif st_dir == -1:
         reasons.append("Supertrend: bearish")
 
-    # 5. Volume momentum (from raw data)
+    # ── Layer 5: MACD momentum — 2-bar confirmation (10%) ─────────────────
+    macd_vote, macd_note = _macd_momentum_vote(close)
+    weighted_score += float(macd_vote) * 0.10
+    layer_votes.append(macd_vote)
+    if macd_vote != 0:
+        reasons.append(macd_note)
+
+    # ── Layer 6: Smoothed RSI trend (8%) ──────────────────────────────────
+    rsi_vote, rsi_note = _smoothed_rsi_vote(close)
+    weighted_score += float(rsi_vote) * 0.08
+    layer_votes.append(rsi_vote)
+    if rsi_vote != 0:
+        reasons.append(rsi_note)
+
+    # ── Layer 7: Volume quality (5%) ──────────────────────────────────────
     vol_contrib = 0.0
     if "volume" in df_5m.columns and len(df_5m) >= 20:
         vol = df_5m["volume"].values.astype(float)
-        close_v = df_5m["close"].values.astype(float)
         avg_vol = float(np.mean(vol[-20:]))
         if avg_vol > 0:
             ratio = float(vol[-1]) / avg_vol
-            if ratio > 1.5 and len(close_v) >= 2:
-                direction = 1.0 if close_v[-1] > close_v[-2] else -1.0
-                vol_contrib = direction * min(ratio / 3.0, 1.0)
-                reasons.append(f"Volume surge ×{ratio:.2f} {'↑' if direction > 0 else '↓'}")
-    weighted_score += vol_contrib * 0.10
+            if ratio > 1.5 and len(close) >= 2:
+                candle_body = abs(float(close[-1]) - float(df_5m["open"].values[-1]))
+                candle_range = float(high[-1]) - float(low[-1])
+                body_ratio = candle_body / candle_range if candle_range > 0 else 0.0
+                if body_ratio >= 0.35:
+                    direction = 1.0 if close[-1] > close[-2] else -1.0
+                    vol_contrib = direction * min(ratio / 3.0, 1.0)
+                    reasons.append(
+                        f"Vol surge ×{ratio:.1f} body={body_ratio:.0%} "
+                        f"{'↑' if direction > 0 else '↓'}"
+                    )
+                    layer_votes.append(1 if direction > 0 else -1)
+                else:
+                    reasons.append(f"Vol surge ×{ratio:.1f} small body — noise, ignored")
+                    layer_votes.append(0)
+            else:
+                layer_votes.append(0)
+        else:
+            layer_votes.append(0)
+    else:
+        layer_votes.append(0)
+    weighted_score += vol_contrib * 0.05
 
+    # ── Candlestick patterns (informational, small weight on 5m noise) ─────
+    candle_score, patterns = _candlestick_signal(df_5m)
+    candle_norm = float(np.clip(candle_score / 1.5, -1.0, 1.0))
+    weighted_score += candle_norm * 0.05
+    if patterns:
+        reasons.append(f"Patterns: {', '.join(patterns)}")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # NOISE FILTERS — applied as multipliers to weighted_score
+    # ─────────────────────────────────────────────────────────────────────
+    noise_notes: list[str] = []
+    noise_mult = 1.0
+
+    # Filter 1: ADX regime gate
+    adx_val = _last(talib.ADX(high, low, close, timeperiod=14))
+    if adx_val is not None:
+        if adx_val < 18:
+            noise_mult *= 0.30
+            noise_notes.append(f"ADX={adx_val:.1f} ranging ×0.30")
+        elif adx_val < 25:
+            noise_mult *= 0.65
+            noise_notes.append(f"ADX={adx_val:.1f} weak trend ×0.65")
+        else:
+            noise_notes.append(f"ADX={adx_val:.1f} trending ✓")
+
+    # Filter 2: Choppiness Index gate
+    ci = _choppiness_index(df_5m)
+    if ci is not None:
+        if ci > 61.8:
+            noise_mult *= 0.45
+            noise_notes.append(f"CI={ci:.1f} choppy ×0.45")
+        elif ci < 38.2:
+            noise_notes.append(f"CI={ci:.1f} trending ✓")
+        else:
+            noise_notes.append(f"CI={ci:.1f} neutral")
+
+    # Filter 3: Volatility spike check
+    atr_arr = talib.ATR(high, low, close, timeperiod=14)
+    cur_atr = _last(atr_arr)
+    if cur_atr is not None and len(atr_arr) >= 20:
+        avg_atr = float(np.nanmean(atr_arr[-20:]))
+        if avg_atr > 0 and cur_atr > 2.5 * avg_atr:
+            noise_mult *= 0.70
+            noise_notes.append(f"ATR spike ×{cur_atr/avg_atr:.1f} ×0.70")
+
+    # Filter 4: Layer conflict penalty
+    bull_count = sum(1 for v in layer_votes if v > 0)
+    bear_count = sum(1 for v in layer_votes if v < 0)
+    if bull_count >= 2 and bear_count >= 2:
+        noise_mult *= 0.50
+        noise_notes.append(f"Conflict {bull_count}↑/{bear_count}↓ ×0.50")
+
+    if noise_notes:
+        reasons.append("Noise filters: " + " | ".join(noise_notes))
+
+    # Apply noise multiplier
+    weighted_score *= noise_mult
+
+    # ─────────────────────────────────────────────────────────────────────
     # Map to action + confidence
+    # ─────────────────────────────────────────────────────────────────────
     final = float(np.clip(weighted_score, -1.0, 1.0))
     confidence = int(abs(final) * 100)
 
-    if final >= 0.25:
+    if final >= 0.20:
         action = "LONG"
-        reasons.insert(0, f"TA score {ta_score:+.2f} → {_tf_label(ta_score)}")
-    elif final <= -0.25:
+        agreeing = bull_count
+    elif final <= -0.20:
         action = "SHORT"
-        reasons.insert(0, f"TA score {ta_score:+.2f} → {_tf_label(ta_score)}")
+        agreeing = bear_count
     else:
         action = "HOLD"
-        reasons.insert(0, f"TA score {ta_score:+.2f} → No clear edge")
-        confidence = max(0, 25 - confidence)
+        agreeing = 0
+
+    # Minimum vote gate — prevent entry on weak consensus
+    if action in ("LONG", "SHORT") and agreeing < min_votes:
+        reasons.append(
+            f"Vote gate: {agreeing} agreeing layers < {min_votes} required → HOLD"
+        )
+        action = "HOLD"
+        confidence = max(0, confidence - 20)
+
+    # Confidence boost for strong consensus
+    if action in ("LONG", "SHORT"):
+        total_active = max(bull_count + bear_count, 1)
+        consensus_ratio = agreeing / total_active
+        if consensus_ratio >= 0.80:
+            confidence = min(97, int(confidence * 1.20))
+            reasons.append(f"Consensus {consensus_ratio:.0%} ✓ boost")
+        elif consensus_ratio >= 0.65:
+            confidence = min(97, int(confidence * 1.10))
+
+    reasons.insert(
+        0,
+        f"TA score {ta_score:+.2f} → {_tf_label(ta_score)} "
+        f"[{bull_count}↑/{bear_count}↓ of {len(layer_votes)} layers]",
+    )
+
+    if action == "HOLD":
+        confidence = max(0, min(confidence, 30))
 
     return PrecisionSignal(
         action=action,
