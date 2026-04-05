@@ -111,6 +111,8 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_TRAILING_STOP_SIM=0          # 1 = TA-SIM: ratchet SL with ATR trail while position open (TA_TRAILING_STOP_ATR_MULT)
   TA_TRAILING_STOP_ATR_MULT=1.5
   TA_MAX_RISK_PCT_PER_TRADE=1.0   # logged on TA-SIM open when enhancements on (full-balance PnL model unchanged)
+  TA_MTF_CONFLUENCE=1             # 0 = plain mean TF score in digest; 1 = weighted MTF confluence (top-down alignment)
+  TA_STRUCTURAL_TP_SL=1           # 1 = TA-SIM: prefer swing-based TP/SL when R:R ≥ 1.5 (not Gemini/precision TP/SL)
 
   TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
 
@@ -1135,6 +1137,243 @@ def _macd_momentum_vote(close: np.ndarray) -> tuple[int, str]:
     return 0, f"MACD-mom: conflicted h={h0:.5f}"
 
 
+def _market_structure_signal(df: pd.DataFrame) -> tuple[int, str]:
+    """
+    Break of Structure (BOS) and Change of Character (CHoCH) on recent pivots.
+    Returns (+1 bullish, -1 bearish, 0 neutral), description.
+    """
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
+    close = df["close"].values.astype(float)
+    n = len(close)
+    if n < 30:
+        return 0, "MS: N/A"
+
+    def swing_highs(arr: np.ndarray, left: int = 5, right: int = 5) -> list[tuple[int, float]]:
+        pivots: list[tuple[int, float]] = []
+        for i in range(left, len(arr) - right):
+            if all(arr[i] >= arr[i - j] for j in range(1, left + 1)) and all(
+                arr[i] >= arr[i + j] for j in range(1, right + 1)
+            ):
+                pivots.append((i, float(arr[i])))
+        return pivots
+
+    def swing_lows(arr: np.ndarray, left: int = 5, right: int = 5) -> list[tuple[int, float]]:
+        pivots: list[tuple[int, float]] = []
+        for i in range(left, len(arr) - right):
+            if all(arr[i] <= arr[i - j] for j in range(1, left + 1)) and all(
+                arr[i] <= arr[i + j] for j in range(1, right + 1)
+            ):
+                pivots.append((i, float(arr[i])))
+        return pivots
+
+    win = min(50, n)
+    sh = swing_highs(highs[-win:])
+    sl_pts = swing_lows(lows[-win:])
+    cur = float(close[-1])
+
+    if len(sh) >= 2 and cur > sh[-1][1]:
+        return 1, f"MS: BOS bullish (broke swing high {sh[-1][1]:.2f})"
+    if len(sl_pts) >= 2 and cur < sl_pts[-1][1]:
+        return -1, f"MS: BOS bearish (broke swing low {sl_pts[-1][1]:.2f})"
+    if len(sh) >= 2 and len(sl_pts) >= 2:
+        last_sh_idx = sh[-1][0]
+        last_sl_idx = sl_pts[-1][0]
+        if last_sl_idx > last_sh_idx and cur > sh[-1][1] * 0.998:
+            return 1, "MS: CHoCH potential bullish reversal"
+        if last_sh_idx > last_sl_idx and cur < sl_pts[-1][1] * 1.002:
+            return -1, "MS: CHoCH potential bearish reversal"
+    return 0, "MS: no clear structure break"
+
+
+def _volume_delta_signal(df: pd.DataFrame, lookback: int = 20) -> tuple[int, str]:
+    """
+    Approximate buy/sell delta from candle body position (OHLCV).
+    Cumulative delta direction over lookback bars.
+    """
+    close = df["close"].values.astype(float)
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    if "volume" not in df.columns or "open" not in df.columns:
+        return 0, "Delta: N/A"
+    vol = df["volume"].values.astype(float)
+    n = len(close)
+    if n < lookback + 5:
+        return 0, "Delta: N/A"
+
+    deltas: list[float] = []
+    for i in range(-lookback, 0):
+        rng = float(high[i]) - float(low[i])
+        if rng < 1e-9:
+            deltas.append(0.0)
+            continue
+        buy_frac = (float(close[i]) - float(low[i])) / rng
+        deltas.append(float(vol[i]) * (buy_frac - (1.0 - buy_frac)))
+
+    cum_delta = float(sum(deltas))
+    recent_delta = float(sum(deltas[-5:])) if len(deltas) >= 5 else float(sum(deltas))
+
+    price_up = float(close[-1]) > float(close[-lookback])
+    delta_up = cum_delta > 0
+
+    if price_up and not delta_up:
+        return -1, f"Delta: bearish divergence (price↑ delta↓ {cum_delta:.0f})"
+    if not price_up and delta_up:
+        return 1, f"Delta: bullish divergence (price↓ delta↑ {cum_delta:.0f})"
+    if delta_up and recent_delta > 0:
+        return 1, f"Delta: bullish momentum (cum {cum_delta:.0f}, recent {recent_delta:.0f})"
+    if not delta_up and recent_delta < 0:
+        return -1, f"Delta: bearish momentum (cum {cum_delta:.0f}, recent {recent_delta:.0f})"
+    return 0, f"Delta: neutral ({cum_delta:.0f})"
+
+
+def _liquidity_levels(df: pd.DataFrame, tolerance_pct: float = 0.15) -> tuple[int, str]:
+    """
+    Clusters of equal highs (sell-side) and equal lows (buy-side) as liquidity pools.
+    """
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
+    close = df["close"].values.astype(float)
+    n = len(close)
+    if n < 30:
+        return 0, "Liq: N/A"
+
+    cur = float(close[-1])
+    tol = cur * (tolerance_pct / 100.0)
+
+    recent_highs = highs[-50:]
+    recent_lows = lows[-50:]
+
+    def cluster_levels(arr: np.ndarray, tol_abs: float) -> list[float]:
+        if len(arr) < 2:
+            return []
+        sorted_arr = sorted(float(x) for x in arr)
+        clusters: list[float] = []
+        group = [sorted_arr[0]]
+        for v in sorted_arr[1:]:
+            if v - group[0] <= tol_abs:
+                group.append(v)
+            else:
+                if len(group) >= 2:
+                    clusters.append(float(np.mean(group)))
+                group = [v]
+        if len(group) >= 2:
+            clusters.append(float(np.mean(group)))
+        return clusters
+
+    sell_side_pools = [l for l in cluster_levels(recent_highs, tol) if l > cur]
+    buy_side_pools = [l for l in cluster_levels(recent_lows, tol) if l < cur]
+
+    if not sell_side_pools and not buy_side_pools:
+        return 0, "Liq: no significant pools nearby"
+
+    nearest_above = min(sell_side_pools) if sell_side_pools else None
+    nearest_below = max(buy_side_pools) if buy_side_pools else None
+
+    dist_above = (nearest_above - cur) / cur * 100 if nearest_above is not None else float("inf")
+    dist_below = (cur - nearest_below) / cur * 100 if nearest_below is not None else float("inf")
+
+    if dist_above < dist_below and dist_above < 0.5:
+        return (
+            1,
+            f"Liq: sell-side pool at {nearest_above:.2f} (+{dist_above:.2f}%) — sweep likely",
+        )
+    if dist_below < dist_above and dist_below < 0.5:
+        return (
+            -1,
+            f"Liq: buy-side pool at {nearest_below:.2f} (-{dist_below:.2f}%) — sweep likely",
+        )
+
+    na = f"{nearest_above:.2f}" if nearest_above is not None else "—"
+    nb = f"{nearest_below:.2f}" if nearest_below is not None else "—"
+    da = dist_above if nearest_above is not None else float("nan")
+    db = dist_below if nearest_below is not None else float("nan")
+    return 0, f"Liq: above {na} ({da:.1f}%), below {nb} ({db:.1f}%)"
+
+
+def _session_quality_multiplier() -> tuple[float, str]:
+    """Reduce confidence during low-liquidity periods (UTC)."""
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    weekday = now.weekday()
+
+    if weekday >= 5:
+        return 0.40, f"Session: weekend (low liquidity ×0.40)"
+
+    if 13 <= hour < 17:
+        return 1.0, f"Session: London+NY overlap ✓ ({hour:02d}:xx UTC)"
+    if 8 <= hour < 13:
+        return 0.85, f"Session: London ({hour:02d}:xx UTC ×0.85)"
+    if 13 <= hour < 22:
+        return 0.90, f"Session: NY ({hour:02d}:xx UTC ×0.90)"
+    if 0 <= hour < 8:
+        return 0.55, f"Session: Asian / pre-London ({hour:02d}:xx UTC ×0.55)"
+    return 0.65, f"Session: post-NY ({hour:02d}:xx UTC ×0.65)"
+
+
+def _mtf_confluence_score(scores: dict[str, float]) -> tuple[float, str]:
+    """
+    Weighted MTF confluence; penalizes 1h vs 1d conflict when both present.
+    """
+    weights = {
+        "5m": 0.10,
+        "15m": 0.15,
+        "30m": 0.15,
+        "1h": 0.25,
+        "4h": 0.15,
+        "1d": 0.20,
+        "1w": 0.03,
+        "1M": 0.02,
+    }
+    if not scores:
+        return 0.0, "MTF: insufficient data"
+    if len(scores) == 1:
+        k, v = next(iter(scores.items()))
+        return float(v), f"MTF: single TF ({k})"
+
+    weighted_sum = 0.0
+    total_w = 0.0
+    for tf, sc in scores.items():
+        w = float(weights.get(tf, 0.05))
+        weighted_sum += float(sc) * w
+        total_w += w
+
+    if total_w < 1e-9:
+        return 0.0, "MTF: insufficient data"
+
+    base = weighted_sum / total_w
+
+    active = [float(sc) for sc in scores.values()]
+    bull = sum(1 for s in active if s > 0.5)
+    bear = sum(1 for s in active if s < -0.5)
+    n_act = len(active)
+
+    note: str
+    if bull >= int(n_act * 0.75) and n_act > 0:
+        base *= 1.25
+        note = f"MTF: {bull}/{n_act} TFs bullish (aligned ✓)"
+    elif bear >= int(n_act * 0.75) and n_act > 0:
+        base *= 1.25
+        note = f"MTF: {bear}/{n_act} TFs bearish (aligned ✓)"
+    elif bull > 0 and bear > 0:
+        s1h = scores.get("1h")
+        s1d = scores.get("1d")
+        if (
+            s1h is not None
+            and s1d is not None
+            and ((s1h > 0.3 and s1d < -0.3) or (s1h < -0.3 and s1d > 0.3))
+        ):
+            base *= 0.25
+            note = "MTF: 1h vs 1d conflict → no-trade zone (base×0.25)"
+        else:
+            base *= 0.60
+            note = f"MTF: mixed ({bull}↑/{bear}↓ of {n_act})"
+    else:
+        note = f"MTF: neutral ({bull}↑/{bear}↓ of {n_act})"
+
+    return float(np.clip(base, -5.0, 5.0)), note
+
+
 @dataclass
 class PrecisionSignal:
     action: str          # "LONG", "SHORT", "HOLD"
@@ -1160,22 +1399,27 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     7. MACD momentum — requires 2 consecutive bars in same direction, rejects single-bar flips.
     8. Volatility spike check — high ATR spike reduces confidence (erratic, unpredictable bars).
     9. Volume quality filter — volume surge on small-body candle is discarded as noise.
+    10. Session quality (UTC) — scales confidence in low-liquidity hours/weekends.
 
-    Layers and weights:
-    - Core TA score (35%) — MA alignment, RSI, Stoch, ADX/DI, CCI, BB, Ichimoku, StochRSI
-    - EMA ribbon (15%)    — 8/13/21/34/55 full alignment (new, noise-resistant)
-    - Divergence (15%)    — RSI + MACD divergence
-    - Supertrend (12%)    — ATR-based Supertrend direction
-    - MACD momentum (10%) — requires 2-bar confirmation, no single-flip noise
-    - Smoothed RSI (8%)   — EMA-smoothed RSI trend direction
-    - Volume quality (5%) — surge only on large-body candles
-    Total weights = 100%
+    Layers and weights (renormalized ×1/1.10 so raw sum ≈ 1.0):
+    - Core TA (30%) — MA alignment, RSI, Stoch, ADX/DI, CCI, BB, Ichimoku, StochRSI
+    - EMA ribbon (12%) — 8/13/21/34/55 alignment
+    - Divergence (12%) — RSI + MACD divergence
+    - Supertrend (10%) — ATR Supertrend
+    - MACD momentum (8%) — 2-bar confirmation
+    - Smoothed RSI (5%) — EMA-smoothed RSI trend
+    - Volume quality (5%) — surge on meaningful body
+    - Candlestick patterns (5%)
+    - Market structure BOS/CHoCH (10%) — swing breaks
+    - Volume delta (8%) — OHLCV delta proxy
+    - Liquidity pools (5%) — equal high/low clusters
 
     Regime/noise multipliers applied after weighting:
     - ADX < 18  → ×0.30 (strong ranging penalty)
     - ADX 18-25 → ×0.65 (weak trend penalty)
     - CI > 61.8 → ×0.45 (choppiness penalty, stacks with ADX)
     - Volatility spike (ATR > 2.5×20bar avg) → ×0.70
+    - Session (weekend / Asian / overlap) → see _session_quality_multiplier
     - Layer conflict (≥2 bull AND ≥2 bear) → ×0.50
     - Min vote gate: fewer than TA_PRECISION_MIN_VOTES agreeing layers → force HOLD
     """
@@ -1189,47 +1433,49 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     layer_votes: list[int] = []   # +1 = bullish layer, -1 = bearish, 0 = neutral
 
     min_votes = int(os.environ.get("TA_PRECISION_MIN_VOTES", "3"))
+    # Raw layer weights sum to 1.10 — scale so contributions match prior ~1.0 scale
+    _w = 1.0 / 1.10
 
-    # ── Layer 1: Core TA score (35%) ──────────────────────────────────────
+    # ── Layer 1: Core TA score (30%) ──────────────────────────────────────
     ta_score, _ = _analyze_ohlcv(df_5m)
     ta_norm = float(np.clip(ta_score / 4.0, -1.0, 1.0))
-    weighted_score = ta_norm * 0.35
+    weighted_score = ta_norm * 0.30 * _w
     layer_votes.append(1 if ta_score >= 1.0 else (-1 if ta_score <= -1.0 else 0))
 
-    # ── Layer 2: EMA ribbon (15%) ──────────────────────────────────────────
+    # ── Layer 2: EMA ribbon (12%) ──────────────────────────────────────────
     ribbon_vote, ribbon_note = _ema_ribbon_vote(close)
-    weighted_score += float(ribbon_vote) * 0.15
+    weighted_score += float(ribbon_vote) * 0.12 * _w
     layer_votes.append(ribbon_vote)
     if ribbon_vote != 0:
         reasons.append(ribbon_note)
 
-    # ── Layer 3: Divergence (15%) ─────────────────────────────────────────
+    # ── Layer 3: Divergence (12%) ─────────────────────────────────────────
     rsi_div, macd_div, div_note = _detect_divergence(df_5m)
     div_score = float(np.clip((rsi_div + macd_div) / 2.0, -1.0, 1.0))
-    weighted_score += div_score * 0.15
+    weighted_score += div_score * 0.12 * _w
     layer_votes.append(1 if div_score > 0 else (-1 if div_score < 0 else 0))
     if rsi_div != 0 or macd_div != 0:
         reasons.append(div_note)
 
-    # ── Layer 4: Supertrend (12%) ─────────────────────────────────────────
+    # ── Layer 4: Supertrend (10%) ─────────────────────────────────────────
     st_dir = _supertrend_signal(df_5m)
-    weighted_score += float(st_dir) * 0.12
+    weighted_score += float(st_dir) * 0.10 * _w
     layer_votes.append(st_dir)
     if st_dir == 1:
         reasons.append("Supertrend: bullish")
     elif st_dir == -1:
         reasons.append("Supertrend: bearish")
 
-    # ── Layer 5: MACD momentum — 2-bar confirmation (10%) ─────────────────
+    # ── Layer 5: MACD momentum — 2-bar confirmation (8%) ───────────────
     macd_vote, macd_note = _macd_momentum_vote(close)
-    weighted_score += float(macd_vote) * 0.10
+    weighted_score += float(macd_vote) * 0.08 * _w
     layer_votes.append(macd_vote)
     if macd_vote != 0:
         reasons.append(macd_note)
 
-    # ── Layer 6: Smoothed RSI trend (8%) ──────────────────────────────────
+    # ── Layer 6: Smoothed RSI trend (5%) ─────────────────────────────────
     rsi_vote, rsi_note = _smoothed_rsi_vote(close)
-    weighted_score += float(rsi_vote) * 0.08
+    weighted_score += float(rsi_vote) * 0.05 * _w
     layer_votes.append(rsi_vote)
     if rsi_vote != 0:
         reasons.append(rsi_note)
@@ -1262,12 +1508,33 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
             layer_votes.append(0)
     else:
         layer_votes.append(0)
-    weighted_score += vol_contrib * 0.05
+    weighted_score += vol_contrib * 0.05 * _w
 
-    # ── Candlestick patterns (informational, small weight on 5m noise) ─────
+    # ── Layer 8: Market structure — BOS/CHoCH (10%) ───────────────────────
+    ms_vote, ms_note = _market_structure_signal(df_5m)
+    weighted_score += float(ms_vote) * 0.10 * _w
+    layer_votes.append(ms_vote)
+    if ms_vote != 0:
+        reasons.append(ms_note)
+
+    # ── Layer 9: Volume delta (8%) ────────────────────────────────────────
+    delta_vote, delta_note = _volume_delta_signal(df_5m)
+    weighted_score += float(delta_vote) * 0.08 * _w
+    layer_votes.append(delta_vote)
+    if delta_vote != 0:
+        reasons.append(delta_note)
+
+    # ── Layer 10: Liquidity level proximity (5%) ──────────────────────────
+    liq_vote, liq_note = _liquidity_levels(df_5m)
+    weighted_score += float(liq_vote) * 0.05 * _w
+    layer_votes.append(liq_vote)
+    if liq_note and "no significant" not in liq_note:
+        reasons.append(liq_note)
+
+    # ── Candlestick patterns (5%) ─────────────────────────────────────────
     candle_score, patterns = _candlestick_signal(df_5m)
     candle_norm = float(np.clip(candle_score / 1.5, -1.0, 1.0))
-    weighted_score += candle_norm * 0.05
+    weighted_score += candle_norm * 0.05 * _w
     if patterns:
         reasons.append(f"Patterns: {', '.join(patterns)}")
 
@@ -1309,7 +1576,12 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
             noise_mult *= 0.70
             noise_notes.append(f"ATR spike ×{cur_atr/avg_atr:.1f} ×0.70")
 
-    # Filter 4: Layer conflict penalty
+    # Filter 4: Session quality (UTC)
+    sess_mult, sess_note = _session_quality_multiplier()
+    noise_mult *= sess_mult
+    noise_notes.append(sess_note)
+
+    # Filter 5: Layer conflict penalty
     bull_count = sum(1 for v in layer_votes if v > 0)
     bear_count = sum(1 for v in layer_votes if v < 0)
     if bull_count >= 2 and bear_count >= 2:
@@ -1716,6 +1988,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
 
     tf_scores: list[float] = []
     tf_labels: list[str] = []
+    score_map: dict[str, float] = {}
     df_5m: pd.DataFrame | None = None
     df_1h: pd.DataFrame | None = None
 
@@ -1735,6 +2008,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             df_1h = df
         sc, det = _analyze_ohlcv(df)
         tf_scores.append(sc)
+        score_map[interval] = float(sc)
         lab = _tf_label(sc)
         tf_labels.append(lab)
         lines.append(f"── {label} ──  {_tf_label(sc)}")
@@ -1774,7 +2048,18 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             except Exception:
                 pass
 
-    mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
+    use_mtf_conf = os.environ.get("TA_MTF_CONFLUENCE", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if use_mtf_conf and score_map:
+        mean_score, mtf_digest_note = _mtf_confluence_score(score_map)
+    else:
+        mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
+        mtf_digest_note = ""
+
     score_5m = float(tf_scores[0]) if tf_scores else 0.0
     label_5m = tf_labels[0] if tf_labels else "N/A"
     use_5m_signal = _signal_on_5m()
@@ -1782,7 +2067,14 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     entry_score_kind = "5m" if use_5m_signal else "mean"
     if tf_scores:
         overall = _tf_label(mean_score)
-        lines.append(f"Summary (mean TF score): {overall}")
+        sum_title = (
+            "MTF confluence"
+            if use_mtf_conf and len(score_map) > 1
+            else "mean TF score"
+        )
+        lines.append(f"Summary ({sum_title}): {overall}")
+        if use_mtf_conf and mtf_digest_note and len(score_map) > 1:
+            lines.append(f"MTF: {mtf_digest_note}")
         lines.append(f"5m score: {score_5m:+.4f} | TF labels: {', '.join(tf_labels)}")
         if use_5m_signal:
             lines.append(f"Entry signal (5m TF): {label_5m} (score {score_5m:+.4f})")
@@ -2041,6 +2333,63 @@ def _atr_from_df(df: pd.DataFrame) -> float | None:
         return None
     a = _last(talib.ATR(high, low, close, timeperiod=14))
     return a
+
+
+def _structural_tp_sl(df: pd.DataFrame, side: str, close: float) -> tuple[float | None, float | None, str]:
+    """
+    TP at next swing-based level in trade direction; SL beyond recent swing with ATR buffer.
+    Returns (tp, sl, description) or (None, None, reason) if R:R < 1.5 or data insufficient.
+    """
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
+    atr = _atr_from_df(df)
+    if atr is None or atr <= 0:
+        return None, None, "structural: ATR unavailable"
+
+    def find_swings(arr: np.ndarray, direction: str, bars: int = 5) -> list[float]:
+        result: list[float] = []
+        for i in range(bars, len(arr) - bars):
+            if direction == "high":
+                if all(arr[i] >= arr[i - j] for j in range(1, bars + 1)) and all(
+                    arr[i] >= arr[i + j] for j in range(1, bars + 1)
+                ):
+                    result.append(float(arr[i]))
+            else:
+                if all(arr[i] <= arr[i - j] for j in range(1, bars + 1)) and all(
+                    arr[i] <= arr[i + j] for j in range(1, bars + 1)
+                ):
+                    result.append(float(arr[i]))
+        return result
+
+    win = min(60, len(highs))
+    sh = find_swings(highs[-win:], "high")
+    sl = find_swings(lows[-win:], "low")
+
+    if side == "LONG":
+        targets_tp = sorted([h for h in sh if h > close * 1.002])
+        targets_sl = sorted([l for l in sl if l < close * 0.998], reverse=True)
+        tp = targets_tp[0] if targets_tp else None
+        sl_level = (targets_sl[0] - atr * 0.3) if targets_sl else None
+    else:
+        targets_tp = sorted([l for l in sl if l < close * 0.998], reverse=True)
+        targets_sl = sorted([h for h in sh if h > close * 1.002])
+        tp = targets_tp[0] if targets_tp else None
+        sl_level = (targets_sl[0] + atr * 0.3) if targets_sl else None
+
+    if tp is None or sl_level is None:
+        return None, None, "structural: insufficient swing data"
+
+    tp_dist = abs(tp - close)
+    sl_dist = abs(sl_level - close)
+
+    if sl_dist < 1e-9:
+        return None, None, "structural: SL distance too small"
+
+    rr = tp_dist / sl_dist
+    if rr < 1.5:
+        return None, None, f"structural: R:R {rr:.2f}:1 too low (min 1.5)"
+
+    return tp, sl_level, f"structural TP {tp:.2f} / SL {sl_level:.2f} | R:R {rr:.2f}:1"
 
 
 def _bar_close_time_5m(df: pd.DataFrame):
@@ -3278,6 +3627,7 @@ def process_ta_trade_sim(
     opened_from_banner = False
     last_fixed_mode = ""
     levels_from_gemini = False
+    precision_tp_sl_used = False
 
     tpm_atr = float(os.environ.get("TA_SIGNAL_TP_ATR_MULT", "2"))
     slm_atr = float(os.environ.get("TA_SIGNAL_SL_ATR_MULT", "1"))
@@ -3293,6 +3643,7 @@ def process_ta_trade_sim(
             ):
                 ps = snap.precision
                 side = ps.action
+                precision_tp_sl_used = True
                 tp_price, sl_price, _rr, _slm, ptp_desc = _precision_entry_tp_sl(
                     df, side, close_price, ps.confidence, snap
                 )
@@ -3503,6 +3854,7 @@ def process_ta_trade_sim(
         ps = snap.precision
         if ps.action in ("LONG", "SHORT") and ps.confidence >= _precision_conf_threshold():
             side = ps.action
+            precision_tp_sl_used = True
             tp_price, sl_price, _rr, _slm, ptp_desc = _precision_entry_tp_sl(
                 df, side, close_price, ps.confidence, snap
             )
@@ -3514,6 +3866,17 @@ def process_ta_trade_sim(
 
     if not side:
         return
+
+    if (
+        os.environ.get("TA_STRUCTURAL_TP_SL", "1").strip().lower() in ("1", "true", "yes", "on")
+        and not levels_from_gemini
+        and not precision_tp_sl_used
+    ):
+        struct_tp, struct_sl, struct_desc = _structural_tp_sl(df, side, close_price)
+        if struct_tp is not None and struct_sl is not None:
+            tp_price, sl_price = struct_tp, struct_sl
+            open_extra = f"{open_extra} | {struct_desc}" if open_extra else struct_desc
+            last_fixed_mode = "structural"
 
     if _reverse_signals_enabled():
         rev_note = "reversed signals"
