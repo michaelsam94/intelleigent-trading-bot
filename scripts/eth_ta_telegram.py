@@ -113,6 +113,8 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_MAX_RISK_PCT_PER_TRADE=1.0   # logged on TA-SIM open when enhancements on (full-balance PnL model unchanged)
   TA_MTF_CONFLUENCE=1             # 0 = plain mean TF score in digest; 1 = weighted MTF confluence (top-down alignment)
   TA_STRUCTURAL_TP_SL=1           # 1 = TA-SIM: prefer swing-based TP/SL when R:R ≥ 1.5 (not Gemini/precision TP/SL)
+  TA_SIM_PRECISION_CONF_GATE=0    # 1 = TA-SIM: require precision LONG/SHORT to match side + min confidence
+  TA_SIM_PRECISION_CONF_MIN=       # optional override for gate; else uses TA_PRECISION_CONF_MIN
 
   TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
 
@@ -136,6 +138,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -405,6 +408,27 @@ def _precision_conf_threshold() -> int:
         return int(os.environ.get("TA_PRECISION_CONF_MIN", "60"))
     except ValueError:
         return 60
+
+
+def _ta_sim_precision_conf_gate_enabled() -> bool:
+    """TA-SIM: when 1, require precision action + min confidence before opening (see TA_SIM_PRECISION_CONF_MIN)."""
+    return os.environ.get("TA_SIM_PRECISION_CONF_GATE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _ta_sim_precision_conf_min() -> int:
+    """Floor for TA-SIM precision gate; falls back to TA_PRECISION_CONF_MIN if unset."""
+    raw = (os.environ.get("TA_SIM_PRECISION_CONF_MIN") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return _precision_conf_threshold()
 
 
 def _live_precision_only_enabled() -> bool:
@@ -1390,10 +1414,10 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     Noise-resistant precision signal aggregator for 5m ETH/crypto data.
 
     Key anti-noise features:
-    1. ADX regime gate — 0.3× penalty when ADX < 18 (ranging market), 0.65× when ADX < 25.
-    2. Choppiness Index gate — 0.45× penalty when CI > 61.8 (golden ratio choppy threshold).
-    3. Signal layer vote system — requires >= TA_PRECISION_MIN_VOTES (default 3) agreeing layers.
-    4. Conflict dampening — heavy penalty when >= 2 layers are bullish AND >= 2 are bearish.
+    1. ADX regime gate — softer ×0.70 / ×0.85 when ADX < 18 / < 22 (tunable via env defaults).
+    2. Choppiness Index gate — ×0.70 when CI > 65 (less harsh than golden-ratio-only).
+    3. Signal layer vote system — requires >= TA_PRECISION_MIN_VOTES (default 2) agreeing layers.
+    4. Conflict dampening — progressive penalty when >= 2 bullish AND >= 2 bearish layers.
     5. Smoothed indicators — RSI and MACD use multi-bar smoothing, not single-bar readings.
     6. EMA ribbon — requires ALL 5 EMAs (8/13/21/34/55) to be aligned, not just one cross.
     7. MACD momentum — requires 2 consecutive bars in same direction, rejects single-bar flips.
@@ -1415,12 +1439,11 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     - Liquidity pools (5%) — equal high/low clusters
 
     Regime/noise multipliers applied after weighting:
-    - ADX < 18  → ×0.30 (strong ranging penalty)
-    - ADX 18-25 → ×0.65 (weak trend penalty)
-    - CI > 61.8 → ×0.45 (choppiness penalty, stacks with ADX)
-    - Volatility spike (ATR > 2.5×20bar avg) → ×0.70
+    - ADX < 18 → ×0.70; ADX 18–22 → ×0.85; else trending note
+    - CI > 65 → ×0.70 choppy; CI < 35 trending note
+    - Volatility spike (ATR > 3×20-bar avg) → ×0.85
     - Session (weekend / Asian / overlap) → see _session_quality_multiplier
-    - Layer conflict (≥2 bull AND ≥2 bear) → ×0.50
+    - Layer conflict → progressive ×0.70–0.90
     - Min vote gate: fewer than TA_PRECISION_MIN_VOTES agreeing layers → force HOLD
     """
     if df_5m is None or len(df_5m) < 60:
@@ -1432,7 +1455,7 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     reasons: list[str] = []
     layer_votes: list[int] = []   # +1 = bullish layer, -1 = bearish, 0 = neutral
 
-    min_votes = int(os.environ.get("TA_PRECISION_MIN_VOTES", "3"))
+    min_votes = int(os.environ.get("TA_PRECISION_MIN_VOTES", "2"))
     # Raw layer weights sum to 1.10 — scale so contributions match prior ~1.0 scale
     _w = 1.0 / 1.10
 
@@ -1440,7 +1463,7 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     ta_score, _ = _analyze_ohlcv(df_5m)
     ta_norm = float(np.clip(ta_score / 4.0, -1.0, 1.0))
     weighted_score = ta_norm * 0.30 * _w
-    layer_votes.append(1 if ta_score >= 1.0 else (-1 if ta_score <= -1.0 else 0))
+    layer_votes.append(1 if ta_score >= 0.8 else (-1 if ta_score <= -0.8 else 0))
 
     # ── Layer 2: EMA ribbon (12%) ──────────────────────────────────────────
     ribbon_vote, ribbon_note = _ema_ribbon_vote(close)
@@ -1491,16 +1514,16 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
                 candle_body = abs(float(close[-1]) - float(df_5m["open"].values[-1]))
                 candle_range = float(high[-1]) - float(low[-1])
                 body_ratio = candle_body / candle_range if candle_range > 0 else 0.0
-                if body_ratio >= 0.35:
+                if body_ratio >= 0.25:
                     direction = 1.0 if close[-1] > close[-2] else -1.0
-                    vol_contrib = direction * min(ratio / 3.0, 1.0)
+                    vol_contrib = direction * min(ratio / 3.0, 0.8)
                     reasons.append(
                         f"Vol surge ×{ratio:.1f} body={body_ratio:.0%} "
                         f"{'↑' if direction > 0 else '↓'}"
                     )
                     layer_votes.append(1 if direction > 0 else -1)
                 else:
-                    reasons.append(f"Vol surge ×{ratio:.1f} small body — noise, ignored")
+                    reasons.append(f"Vol surge ×{ratio:.1f} small body — filtered")
                     layer_votes.append(0)
             else:
                 layer_votes.append(0)
@@ -1544,25 +1567,25 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     noise_notes: list[str] = []
     noise_mult = 1.0
 
-    # Filter 1: ADX regime gate
+    # Filter 1: ADX regime gate (softer than legacy ×0.30 / ×0.65)
     adx_val = _last(talib.ADX(high, low, close, timeperiod=14))
     if adx_val is not None:
         if adx_val < 18:
-            noise_mult *= 0.30
-            noise_notes.append(f"ADX={adx_val:.1f} ranging ×0.30")
-        elif adx_val < 25:
-            noise_mult *= 0.65
-            noise_notes.append(f"ADX={adx_val:.1f} weak trend ×0.65")
+            noise_mult *= 0.70
+            noise_notes.append(f"ADX={adx_val:.1f} ranging ×0.70")
+        elif adx_val < 22:
+            noise_mult *= 0.85
+            noise_notes.append(f"ADX={adx_val:.1f} weak trend ×0.85")
         else:
             noise_notes.append(f"ADX={adx_val:.1f} trending ✓")
 
     # Filter 2: Choppiness Index gate
     ci = _choppiness_index(df_5m)
     if ci is not None:
-        if ci > 61.8:
-            noise_mult *= 0.45
-            noise_notes.append(f"CI={ci:.1f} choppy ×0.45")
-        elif ci < 38.2:
+        if ci > 65:
+            noise_mult *= 0.70
+            noise_notes.append(f"CI={ci:.1f} choppy ×0.70")
+        elif ci < 35:
             noise_notes.append(f"CI={ci:.1f} trending ✓")
         else:
             noise_notes.append(f"CI={ci:.1f} neutral")
@@ -1572,21 +1595,25 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     cur_atr = _last(atr_arr)
     if cur_atr is not None and len(atr_arr) >= 20:
         avg_atr = float(np.nanmean(atr_arr[-20:]))
-        if avg_atr > 0 and cur_atr > 2.5 * avg_atr:
-            noise_mult *= 0.70
-            noise_notes.append(f"ATR spike ×{cur_atr/avg_atr:.1f} ×0.70")
+        if avg_atr > 0 and cur_atr > 3.0 * avg_atr:
+            noise_mult *= 0.85
+            noise_notes.append(f"ATR spike ×{cur_atr/avg_atr:.1f} ×0.85")
 
     # Filter 4: Session quality (UTC)
     sess_mult, sess_note = _session_quality_multiplier()
     noise_mult *= sess_mult
     noise_notes.append(sess_note)
 
-    # Filter 5: Layer conflict penalty
+    # Filter 5: Layer conflict penalty (progressive)
     bull_count = sum(1 for v in layer_votes if v > 0)
     bear_count = sum(1 for v in layer_votes if v < 0)
     if bull_count >= 2 and bear_count >= 2:
-        noise_mult *= 0.50
-        noise_notes.append(f"Conflict {bull_count}↑/{bear_count}↓ ×0.50")
+        mx = max(bull_count, bear_count)
+        mn = min(bull_count, bear_count)
+        conflict_ratio = float(mn) / float(mx) if mx else 0.0
+        penalty = 0.70 + (conflict_ratio * 0.20)
+        noise_mult *= penalty
+        noise_notes.append(f"Conflict {bull_count}↑/{bear_count}↓ ×{penalty:.2f}")
 
     if noise_notes:
         reasons.append("Noise filters: " + " | ".join(noise_notes))
@@ -1600,10 +1627,13 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     final = float(np.clip(weighted_score, -1.0, 1.0))
     confidence = int(abs(final) * 100)
 
-    if final >= 0.20:
+    if adx_val is not None and adx_val >= 22:
+        confidence = min(100, int(confidence * 1.15))
+
+    if final >= 0.15:
         action = "LONG"
         agreeing = bull_count
-    elif final <= -0.20:
+    elif final <= -0.15:
         action = "SHORT"
         agreeing = bear_count
     else:
@@ -1616,17 +1646,15 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
             f"Vote gate: {agreeing} agreeing layers < {min_votes} required → HOLD"
         )
         action = "HOLD"
-        confidence = max(0, confidence - 20)
+        confidence = max(0, confidence - 15)
 
     # Confidence boost for strong consensus
     if action in ("LONG", "SHORT"):
         total_active = max(bull_count + bear_count, 1)
         consensus_ratio = agreeing / total_active
-        if consensus_ratio >= 0.80:
-            confidence = min(97, int(confidence * 1.20))
+        if consensus_ratio >= 0.70:
+            confidence = min(95, int(confidence * 1.15))
             reasons.append(f"Consensus {consensus_ratio:.0%} ✓ boost")
-        elif consensus_ratio >= 0.65:
-            confidence = min(97, int(confidence * 1.10))
 
     reasons.insert(
         0,
@@ -1635,7 +1663,7 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
     )
 
     if action == "HOLD":
-        confidence = max(0, min(confidence, 30))
+        confidence = max(0, min(confidence, 50))
 
     return PrecisionSignal(
         action=action,
@@ -1654,9 +1682,9 @@ def _compute_precision_signal_enhanced(df_5m: pd.DataFrame, regime: str) -> Prec
     if regime != "trending":
         return ps
     try:
-        boost = float(os.environ.get("TA_PRECISION_TRENDING_BOOST", "1.15"))
+        boost = float(os.environ.get("TA_PRECISION_TRENDING_BOOST", "1.25"))
     except ValueError:
-        boost = 1.15
+        boost = 1.25
     ps.confidence = min(100, int(ps.confidence * boost))
     return ps
 
@@ -2155,18 +2183,27 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         else:
             precision = _compute_precision_signal(df_5m)
         action_emoji = {"LONG": "🟢", "SHORT": "🔴", "HOLD": "🟡"}.get(precision.action, "⚪")
-        bar = "█" * (precision.confidence // 10) + "░" * (10 - precision.confidence // 10)
+        pc = precision.confidence
+        seg = max(0, min(10, pc // 10))
+        if pc > 0 and seg == 0:
+            seg = 1
+        bar = "█" * seg + "░" * (10 - seg)
         precision_header_lines.append(
-            f"⚡ PRECISION SIGNAL: {action_emoji} {precision.action}  |  Confidence: {precision.confidence}%  [{bar}]"
+            f"⚡ PRECISION SIGNAL: {action_emoji} {precision.action}  |  Confidence: {pc}%  [{bar}]"
         )
+        vote_txt = f"Score: {precision.score:+.3f}"
         if precision.reasons:
-            precision_header_lines.append("Basis: " + " · ".join(precision.reasons))
-        if precision.patterns:
-            pass  # already in reasons
+            m = re.search(r"\[(\d+)↑/(\d+)↓ of (\d+) layers\]", precision.reasons[0])
+            if m:
+                vote_txt += f" | Votes: {m.group(1)}↑ / {m.group(2)}↓ ({m.group(3)} layers)"
+        precision_header_lines.append(vote_txt)
+        if len(precision.reasons) > 1:
+            top = precision.reasons[1:4]
+            precision_header_lines.append("Signal: " + " · ".join(top))
         if precision.divergence_note and precision.divergence_note != "No divergence":
             precision_header_lines.append(f"Divergence: {precision.divergence_note}")
         st_txt = {1: "↑ Bullish", -1: "↓ Bearish", 0: "—"}.get(precision.supertrend, "—")
-        precision_header_lines.append(f"Supertrend: {st_txt}  |  Raw score: {precision.score:+.3f}")
+        precision_header_lines.append(f"Supertrend: {st_txt}")
         precision_header_lines.append("─" * 40)
     except Exception as e:
         precision_header_lines.append(f"⚡ Precision signal: (error: {e})")
@@ -2194,6 +2231,27 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         precision=precision,
         regime=regime,
     )
+
+
+def _ta_sim_precision_gate_ok(snap: TASnapshot, side: str) -> tuple[bool, str]:
+    """
+    Optional TA-SIM filter (TA_SIM_PRECISION_CONF_GATE=1): align trade side with precision
+    and require minimum confidence (TA_SIM_PRECISION_CONF_MIN or TA_PRECISION_CONF_MIN).
+    When precision is missing, the gate does not block.
+    """
+    if not _ta_sim_precision_conf_gate_enabled():
+        return True, ""
+    p = snap.precision
+    if p is None:
+        return True, ""
+    if p.action not in ("LONG", "SHORT"):
+        return False, f"precision is {p.action} (need LONG/SHORT)"
+    if p.action != side:
+        return False, f"precision says {p.action}, trade {side}"
+    mn = _ta_sim_precision_conf_min()
+    if p.confidence < mn:
+        return False, f"precision {p.confidence}% < {mn}%"
+    return True, f"precision {p.confidence}% OK (min {mn}%)"
 
 
 # --- TA paper trading (isolated paths) ---
@@ -3877,6 +3935,11 @@ def process_ta_trade_sim(
             tp_price, sl_price = struct_tp, struct_sl
             open_extra = f"{open_extra} | {struct_desc}" if open_extra else struct_desc
             last_fixed_mode = "structural"
+
+    ok_gate, gate_reason = _ta_sim_precision_gate_ok(snap, side)
+    if not ok_gate:
+        print(f"TA-SIM entry skipped: {gate_reason}", flush=True)
+        return
 
     if _reverse_signals_enabled():
         rev_note = "reversed signals"
