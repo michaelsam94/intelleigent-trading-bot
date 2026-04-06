@@ -115,6 +115,11 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_STRUCTURAL_TP_SL=1           # 1 = TA-SIM: prefer swing-based TP/SL when R:R ≥ 1.5 (not Gemini/precision TP/SL)
   TA_SIM_PRECISION_CONF_GATE=0    # 1 = TA-SIM: require precision LONG/SHORT to match side + min confidence
   TA_SIM_PRECISION_CONF_MIN=       # optional override for gate; else uses TA_PRECISION_CONF_MIN
+  TA_POST_SL_DIRECTION_GUARD=1    # After N SLs same way, tighten repeat entries; validate flips vs 5m/precision
+  TA_POST_SL_CONSEC_MIN=2         # streak length before guard applies (uses stats.json SL streak)
+  TA_POST_SL_SAME_DIR_MIN_CONF=68   # min precision % to take same side again after streak
+  TA_POST_SL_FLIP_BLOCK_CONF=52     # block flip if precision still favors losing side at ≥ this %
+  TA_LIVE_UNKNOWN_CLOSE_AS_LOSS=0   # if 1: when mark is between TP/SL, count SL for stats; else skip that close
 
   TA_STARTUP_TELEGRAM=1       # 1=send one Telegram message on process start (restart)
 
@@ -147,7 +152,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -2274,27 +2279,351 @@ def _stats_path(symbol: str) -> Path:
     return _ta_dir(symbol) / "stats.json"
 
 
-def _load_stats(symbol: str) -> dict[str, int]:
+def _load_stats(symbol: str) -> dict[str, int | str]:
     p = _stats_path(symbol)
+    empty: dict[str, int | str] = {
+        "wins": 0,
+        "losses": 0,
+        "loss_streak": 0,
+        "sl_same_dir_side": "",
+        "sl_same_dir_count": 0,
+    }
     if not p.is_file():
-        return {"wins": 0, "losses": 0, "loss_streak": 0}
+        return empty
     try:
         with open(p, encoding="utf-8") as f:
             d = json.load(f)
-        return {
-            "wins": int(d.get("wins", 0)),
-            "losses": int(d.get("losses", 0)),
-            "loss_streak": int(d.get("loss_streak", 0)),
-        }
+        empty["wins"] = int(d.get("wins", 0))
+        empty["losses"] = int(d.get("losses", 0))
+        empty["loss_streak"] = int(d.get("loss_streak", 0))
+        empty["sl_same_dir_side"] = str(d.get("sl_same_dir_side") or "")
+        empty["sl_same_dir_count"] = int(d.get("sl_same_dir_count", 0))
+        return empty
     except Exception:
-        return {"wins": 0, "losses": 0, "loss_streak": 0}
+        return {
+            "wins": 0,
+            "losses": 0,
+            "loss_streak": 0,
+            "sl_same_dir_side": "",
+            "sl_same_dir_count": 0,
+        }
 
 
-def _save_stats(symbol: str, wins: int, losses: int, loss_streak: int = 0) -> None:
+def _save_stats(
+    symbol: str,
+    wins: int,
+    losses: int,
+    loss_streak: int = 0,
+    *,
+    sl_same_dir_side: str = "",
+    sl_same_dir_count: int = 0,
+) -> None:
     p = _stats_path(symbol)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
-        json.dump({"wins": wins, "losses": losses, "loss_streak": loss_streak}, f, indent=2)
+        json.dump(
+            {
+                "wins": wins,
+                "losses": losses,
+                "loss_streak": loss_streak,
+                "sl_same_dir_side": sl_same_dir_side,
+                "sl_same_dir_count": int(sl_same_dir_count),
+            },
+            f,
+            indent=2,
+        )
+
+
+def _record_trade_outcome_stats(symbol: str, side: str, win: bool) -> dict[str, int | str]:
+    """
+    Shared stats update for TA-SIM and live (wins/losses/loss_streak + post-SL same-direction streak).
+    """
+    st0 = _load_stats(symbol)
+    prev_ls = int(st0.get("loss_streak", 0))
+    if win:
+        st0["wins"] = int(st0["wins"]) + 1
+        new_ls = 0
+        st0["sl_same_dir_side"] = ""
+        st0["sl_same_dir_count"] = 0
+    else:
+        st0["losses"] = int(st0["losses"]) + 1
+        new_ls = prev_ls + 1
+        ss = str(st0.get("sl_same_dir_side") or "")
+        sc = int(st0.get("sl_same_dir_count", 0))
+        if ss == side:
+            st0["sl_same_dir_count"] = sc + 1
+        else:
+            st0["sl_same_dir_side"] = side
+            st0["sl_same_dir_count"] = 1
+    _save_stats(
+        symbol,
+        int(st0["wins"]),
+        int(st0["losses"]),
+        new_ls,
+        sl_same_dir_side=str(st0.get("sl_same_dir_side") or ""),
+        sl_same_dir_count=int(st0.get("sl_same_dir_count", 0)),
+    )
+    return st0
+
+
+def _live_track_path(symbol: str) -> Path:
+    return _ta_dir(symbol) / "live_track.json"
+
+
+def _load_live_track(symbol: str) -> dict[str, Any] | None:
+    p = _live_track_path(symbol)
+    if not p.is_file():
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_live_track(symbol: str, data: dict[str, Any]) -> None:
+    p = _live_track_path(symbol)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _clear_live_track(symbol: str) -> None:
+    p = _live_track_path(symbol)
+    if p.is_file():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _futures_position_amt_and_entry(client: Client, fut_symbol: str) -> tuple[float, float]:
+    """Returns (position_amt, entry_price) for USD-M symbol."""
+    for r in client.futures_position_information(symbol=fut_symbol):
+        if str(r.get("symbol", "")).upper() == fut_symbol.upper():
+            return float(r.get("positionAmt", "0") or 0.0), float(r.get("entryPrice", "0") or 0.0)
+    return 0.0, 0.0
+
+
+def _futures_order_working(client: Client, fut_symbol: str, order_id: int | None) -> bool:
+    if order_id is None:
+        return False
+    try:
+        o = client.futures_get_order(symbol=fut_symbol, orderId=int(order_id))
+        st = str(o.get("status", "")).upper()
+        return st in ("NEW", "PARTIALLY_FILLED")
+    except Exception:
+        return False
+
+
+def _infer_live_close_win(side: str, mark: float, tp: float, sl: float, tick: float) -> bool | None:
+    """
+    Best-effort TP vs SL from mark after flat (True=TP win, False=SL loss).
+    Returns None if ambiguous (manual close mid-range).
+    """
+    band = max(tick * 4, abs(tp - sl) * 1e-8, 1e-9)
+    if side == "LONG":
+        if mark >= tp - band:
+            return True
+        if mark <= sl + band:
+            return False
+    else:
+        if mark <= tp + band:
+            return True
+        if mark >= sl - band:
+            return False
+    return None
+
+
+def sync_live_position_stats(
+    symbol: str, client: Client, fut_symbol: str, *, emit: Callable[[str], None]
+) -> None:
+    """
+    Persist live futures outcomes into the same stats.json as TA-SIM (wins/losses/post-SL streak).
+    Uses live_track.json: written when the bot places an entry; cleared when position is flat.
+    """
+    track = _load_live_track(symbol)
+    if not track:
+        return
+
+    pos_amt, entry_px = _futures_position_amt_and_entry(client, fut_symbol)
+    try:
+        _, tick, _, _ = _futures_symbol_filters(client, fut_symbol)
+    except Exception:
+        tick = 0.01
+
+    eps = 1e-12
+    pending = bool(track.get("pending_fill"))
+    oid = track.get("entry_order_id")
+
+    if pending and abs(pos_amt) > eps:
+        track["pending_fill"] = False
+        track["entry_price"] = float(entry_px) if entry_px > 0 else float(track.get("entry_limit_px") or 0)
+        _save_live_track(symbol, track)
+        emit(
+            f"LIVE track: fill detected {track.get('side')} amt={pos_amt} entry≈{track['entry_price']:,.2f}"
+        )
+        return
+
+    if pending and abs(pos_amt) <= eps:
+        oid_i = int(oid) if oid is not None else None
+        if _futures_order_working(client, fut_symbol, oid_i):
+            return
+        _clear_live_track(symbol)
+        emit("LIVE track: entry order finished without position — cleared pending track")
+        return
+
+    if not pending and abs(pos_amt) > eps:
+        return
+
+    if not pending and abs(pos_amt) <= eps and track.get("side"):
+        side = str(track["side"]).upper()
+        tp = float(track["tp_price"])
+        sl = float(track["sl_price"])
+        mark = _futures_mark_price(client, fut_symbol)
+        if mark is None or mark <= 0:
+            _clear_live_track(symbol)
+            emit("LIVE track: flat but mark unavailable — track cleared (stats unchanged)")
+            return
+        win = _infer_live_close_win(side, float(mark), tp, sl, float(tick))
+        if win is None:
+            if os.environ.get("TA_LIVE_UNKNOWN_CLOSE_AS_LOSS", "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                win = False
+                emit(
+                    f"LIVE stats: ambiguous close (mark {mark:,.2f} vs TP/SL) — counted as loss (TA_LIVE_UNKNOWN_CLOSE_AS_LOSS=1)"
+                )
+            else:
+                _clear_live_track(symbol)
+                emit(
+                    f"LIVE stats: ambiguous close (mark {mark:,.2f}) — stats unchanged; set TA_LIVE_UNKNOWN_CLOSE_AS_LOSS=1 to count as loss"
+                )
+                return
+        st0 = _record_trade_outcome_stats(symbol, side, win)
+        res = "TP" if win else "SL"
+        emoji = "✅" if win else "❌"
+        emit(
+            f"📌 LIVE stats synced: {side} closed @ {res} {emoji} (mark {mark:,.2f}) → "
+            f"W:{st0['wins']} L:{st0['losses']} streak_SL_dir={st0.get('sl_same_dir_side')!s}×{st0.get('sl_same_dir_count')}"
+        )
+        _clear_live_track(symbol)
+
+
+def _post_sl_direction_guard_enabled() -> bool:
+    """After consecutive SLs in the same direction, require stronger evidence to repeat or flip."""
+    return os.environ.get("TA_POST_SL_DIRECTION_GUARD", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _post_sl_consec_min() -> int:
+    try:
+        return max(1, int(os.environ.get("TA_POST_SL_CONSEC_MIN", "2")))
+    except ValueError:
+        return 2
+
+
+def _post_sl_same_dir_min_conf() -> int:
+    try:
+        return int(os.environ.get("TA_POST_SL_SAME_DIR_MIN_CONF", "68"))
+    except ValueError:
+        return 68
+
+
+def _post_sl_flip_block_conf() -> int:
+    """Block flipping direction if precision still favors the streak-losing side at or above this."""
+    try:
+        return int(os.environ.get("TA_POST_SL_FLIP_BLOCK_CONF", "52"))
+    except ValueError:
+        return 52
+
+
+def _post_sl_direction_guard(symbol: str, snap: TASnapshot, proposed_side: str) -> tuple[bool, str]:
+    """
+    Uses stats sl_same_dir_* updated on each TA-SIM close (SL streak in one direction).
+
+    After TA_POST_SL_CONSEC_MIN (default 2) stop-outs on the same side:
+    - Repeating that side: require precision to agree, confidence ≥ TA_POST_SL_SAME_DIR_MIN_CONF,
+      and 5m score aligned with entry thresholds.
+    - Flipping: block if precision still strongly favors the old side, or 5m score has not turned.
+    """
+    if not _post_sl_direction_guard_enabled():
+        return True, ""
+    st = _load_stats(symbol)
+    streak_side = str(st.get("sl_same_dir_side") or "").strip().upper()
+    cnt = int(st.get("sl_same_dir_count", 0))
+    need = _post_sl_consec_min()
+    if cnt < need or streak_side not in ("LONG", "SHORT"):
+        return True, ""
+
+    try:
+        long_min = float(os.environ.get("TA_LONG_ENTRY_SCORE", "0.8"))
+        short_max = float(os.environ.get("TA_SHORT_ENTRY_SCORE", "-0.8"))
+    except ValueError:
+        long_min, short_max = 0.8, -0.8
+
+    ps = snap.precision
+    p_act = ps.action if ps is not None else "HOLD"
+    p_conf = int(ps.confidence) if ps is not None else 0
+    sc5 = float(snap.score_5m)
+    flip_block = _post_sl_flip_block_conf()
+
+    if proposed_side == streak_side:
+        min_c = _post_sl_same_dir_min_conf()
+        if p_act != proposed_side:
+            return (
+                False,
+                f"post-SL guard: {cnt} SLs on {streak_side} — repeat {proposed_side} needs precision "
+                f"{proposed_side} (got {p_act})",
+            )
+        if p_conf < min_c:
+            return (
+                False,
+                f"post-SL guard: repeat {proposed_side} needs precision ≥{min_c}% (got {p_conf}%)",
+            )
+        if proposed_side == "LONG" and sc5 < long_min * 0.85:
+            return (
+                False,
+                f"post-SL guard: repeat LONG needs 5m ≥ {long_min * 0.85:.2f} (got {sc5:+.2f})",
+            )
+        if proposed_side == "SHORT" and sc5 > short_max * 0.85:
+            return (
+                False,
+                f"post-SL guard: repeat SHORT needs 5m ≤ {short_max * 0.85:.2f} (got {sc5:+.2f})",
+            )
+        return True, ""
+
+    if proposed_side == "SHORT" and streak_side == "LONG":
+        if p_act == "LONG" and p_conf >= flip_block:
+            return (
+                False,
+                f"post-SL guard: flip SHORT blocked — precision still LONG {p_conf}% (≥{flip_block}% flip block)",
+            )
+        if sc5 >= long_min * 0.95:
+            return (
+                False,
+                f"post-SL guard: flip SHORT blocked — 5m still bullish {sc5:+.2f} (entry long min {long_min:.2f})",
+            )
+    elif proposed_side == "LONG" and streak_side == "SHORT":
+        if p_act == "SHORT" and p_conf >= flip_block:
+            return (
+                False,
+                f"post-SL guard: flip LONG blocked — precision still SHORT {p_conf}% (≥{flip_block}% flip block)",
+            )
+        if sc5 <= short_max * 0.95:
+            return (
+                False,
+                f"post-SL guard: flip LONG blocked — 5m still bearish {sc5:+.2f} (entry short max {short_max:.2f})",
+            )
+
+    return True, ""
 
 
 def _tx_path(symbol: str) -> Path:
@@ -2966,6 +3295,7 @@ def _futures_available_usdt(client: Client) -> float:
 def _decide_ta_entry(
     snap: TASnapshot,
     *,
+    symbol: str | None = None,
     gemini_dec: dict[str, Any] | None = None,
     gemini_shared_ran: bool = False,
 ) -> tuple[str, float, float, float, float, tuple[float, float] | None] | None:
@@ -3199,6 +3529,13 @@ def _decide_ta_entry(
     ok, _reason = _entry_filters_pass(snap, side, df)
     if not ok:
         return None
+
+    sym = (symbol or os.environ.get("TA_SYMBOL", "ETHUSDC")).strip().upper()
+    ok_sl, sl_reason = _post_sl_direction_guard(sym, snap, side)
+    if not ok_sl:
+        print(f"LIVE skip: {sl_reason}", flush=True)
+        return None
+
     if tp_price <= 0 or sl_price <= 0:
         tp_price, sl_price, _ = _fixed_tp_sl_levels(side, close_price, price_tp_pct, price_sl_pct, lev, atr_sig)
     return side, close_price, tp_price, sl_price, lev, live_gemini_zone
@@ -3220,13 +3557,17 @@ def process_ta_trade_live_futures(
             broadcast_telegram_plain(token, msg, {})
         print(msg, flush=True)
 
+    sync_live_position_stats(symbol, client, fut_symbol, emit=_tx)
+
     # one-position-only: check before Gemini/TA entry work (avoids extra API calls)
     pos_amt = _futures_position_amt(client, fut_symbol)
     if abs(pos_amt) > 1e-12:
         print(f"LIVE skip: existing futures position amount on {fut_symbol}: {pos_amt}", flush=True)
         return
 
-    dec = _decide_ta_entry(snap, gemini_dec=gemini_dec, gemini_shared_ran=gemini_shared_ran)
+    dec = _decide_ta_entry(
+        snap, symbol=fut_symbol, gemini_dec=gemini_dec, gemini_shared_ran=gemini_shared_ran
+    )
     if dec is None:
         print("LIVE skip: no entry decision this cycle (signal/filter gate).", flush=True)
         return
@@ -3410,6 +3751,19 @@ def process_ta_trade_live_futures(
             f"Planned TP: {tp_price:,.2f} | SL: {sl_price:,.2f} | Leverage: {lev:.1f}x\n"
             f"TA_REAL_ENTRY_WAIT_FOR_FILL=0 — bot returns; GTC entry left working."
         )
+        _save_live_track(
+            symbol,
+            {
+                "fut_symbol": fut_symbol,
+                "side": side,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "entry_limit_px": px,
+                "qty": float(qty),
+                "pending_fill": True,
+                "entry_order_id": oid,
+            },
+        )
         if preplace:
             try:
                 _place_exit_orders(qty)
@@ -3476,6 +3830,18 @@ def process_ta_trade_live_futures(
         f"✅ LIVE {side} opened\n"
         f"Entry fill: {avg_fill:,.2f}\n"
         f"TP/SL mode: {exit_mode.upper()} | TP: {tp_price:,.2f} | SL: {sl_price:,.2f}"
+    )
+    _save_live_track(
+        symbol,
+        {
+            "fut_symbol": fut_symbol,
+            "side": side,
+            "entry_price": avg_fill,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "pending_fill": False,
+            "entry_order_id": oid,
+        },
     )
     tp_w = _round_to_step(tp_price, tick, up=(side == "LONG"))
     sl_w = _round_to_step(sl_price, tick, up=(side == "LONG"))
@@ -3588,16 +3954,8 @@ def process_ta_trade_sim(
 
             res = "TP" if hit_tp else "SL"
             emoji = "✅" if win else "❌"
-            st0 = _load_stats(symbol)
-            prev_ls = int(st0.get("loss_streak", 0))
-            if win:
-                st0["wins"] += 1
-                new_ls = 0
-            else:
-                st0["losses"] += 1
-                new_ls = prev_ls + 1
-            _save_stats(symbol, st0["wins"], st0["losses"], new_ls)
-            closed_n = st0["wins"] + st0["losses"]
+            st0 = _record_trade_outcome_stats(symbol, side, win)
+            closed_n = int(st0["wins"]) + int(st0["losses"])
 
             _tx(
                 f"🔒 {side} closed ({emoji} {res})\n"
@@ -3964,6 +4322,11 @@ def process_ta_trade_sim(
             side = _opposite_side(side)
         open_extra = f"{open_extra} | {rev_note}" if open_extra else rev_note
 
+    ok_post, post_sl_reason = _post_sl_direction_guard(symbol, snap, side)
+    if not ok_post:
+        print(f"TA-SIM entry skipped: {post_sl_reason}", flush=True)
+        return
+
     if _strategy_30_mar_enabled() and not _strategy_enhancements_enabled():
         ok, skip_reason = True, ""
     else:
@@ -4183,7 +4546,8 @@ def main() -> int:
         _save_balance(symbol, st, st)
         _clear_position(symbol)
         _clear_last_close(symbol)
-        _save_stats(symbol, 0, 0, 0)
+        _clear_live_track(symbol)
+        _save_stats(symbol, 0, 0, 0, sl_same_dir_side="", sl_same_dir_count=0)
         print(
             f"TA reset on start: balance={st}, position + stats + inter-trade cooldown cleared "
             f"(TA_RESET_ON_START / TA_RESET_BALANCE_ON_RESTART)",

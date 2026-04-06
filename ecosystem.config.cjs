@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+
 const projectRoot = __dirname;
 const venvPython = path.join(projectRoot, "venv", "bin", "python");
 const python = fs.existsSync(venvPython) ? venvPython : "python";
@@ -25,7 +26,7 @@ if (fs.existsSync(envPath)) {
   });
 }
 
-// Ensure venv is used
+// Ensure venv is always used
 env.VIRTUAL_ENV = path.join(projectRoot, "venv");
 env.PATH = path.join(projectRoot, "venv", "bin") + ":" + process.env.PATH;
 
