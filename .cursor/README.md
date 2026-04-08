@@ -1,10 +1,8 @@
-# Cursor + [agent-skills](https://github.com/addyosmani/agent-skills)
+# Cursor agent skills
 
-This project vendors [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) as a **git submodule** at `vendor/agent-skills/`.
+Two skill packs are vendored as **git submodules** and copied into `.cursor/rules/` as `.md` files (see [Cursor setup for agent-skills](https://github.com/addyosmani/agent-skills/blob/main/docs/cursor-setup.md)).
 
-## What’s in `.cursor/rules/`
-
-Per [docs/cursor-setup.md](https://github.com/addyosmani/agent-skills/blob/main/docs/cursor-setup.md), a small set of skills is copied here so Cursor loads them automatically (avoid loading all 19 at once—context limits).
+## 1. [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) → `vendor/agent-skills/`
 
 | Rule file | Skill |
 |-----------|--------|
@@ -12,21 +10,42 @@ Per [docs/cursor-setup.md](https://github.com/addyosmani/agent-skills/blob/main/
 | `code-review-and-quality.md` | Five-axis review |
 | `incremental-implementation.md` | Small vertical slices |
 
-## Update the upstream skills
+**Update upstream:**
 
 ```bash
 git submodule update --remote vendor/agent-skills
+cp vendor/agent-skills/skills/test-driven-development/SKILL.md .cursor/rules/test-driven-development.md
+# …repeat for other skills you use
 ```
 
-Then refresh the copies you care about, for example:
+## 2. [michaelsam94/agent-skills](https://github.com/michaelsam94/agent-skills) (Vercel skills fork) → `vendor/michaelsam94-agent-skills/`
+
+Files are prefixed with `vercel-` so names stay clear next to the addyosmani rules.
+
+| Rule file | Skill |
+|-----------|--------|
+| `vercel-react-best-practices.md` | React / Next.js performance |
+| `vercel-web-design-guidelines.md` | Web Interface Guidelines audits (fetches live rules from Vercel) |
+| `vercel-react-native-skills.md` | React Native / Expo |
+| `vercel-react-view-transitions.md` | View Transition API / Next.js |
+| `vercel-composition-patterns.md` | Composition patterns |
+| `vercel-deploy-to-vercel.md` | Deploy to Vercel |
+| `vercel-vercel-cli-with-tokens.md` | Vercel CLI + tokens |
+
+**Update upstream:**
 
 ```bash
-cp vendor/agent-skills/skills/test-driven-development/SKILL.md .cursor/rules/test-driven-development.md
+git submodule update --remote vendor/michaelsam94-agent-skills
+cp vendor/michaelsam94-agent-skills/skills/react-best-practices/SKILL.md .cursor/rules/vercel-react-best-practices.md
+# …repeat per skill
 ```
 
-## Add more skills
+## Context size
 
-Copy any `vendor/agent-skills/skills/<name>/SKILL.md` to `.cursor/rules/<name>.md`, or use Cursor **Notepads** for occasional skills (see upstream README).
+Many rules load a lot of tokens. If responses feel noisy or slow:
+
+- Move rarely used `.md` files out of `.cursor/rules/` into `.cursor/skills-archive/` (or Cursor **Notepads**), or
+- Keep only the packs you need in `rules/` and copy others on demand.
 
 ## Clone on another machine
 

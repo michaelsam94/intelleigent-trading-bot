@@ -1,3 +1,6 @@
 [submodule "vendor/agent-skills"]
 	path = vendor/agent-skills
 	url = https://github.com/addyosmani/agent-skills.git
+[submodule "vendor/michaelsam94-agent-skills"]
+	path = vendor/michaelsam94-agent-skills
+	url = https://github.com/michaelsam94/agent-skills.git
