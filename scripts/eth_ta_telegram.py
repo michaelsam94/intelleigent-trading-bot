@@ -112,7 +112,13 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
   TA_TRAILING_STOP_ATR_MULT=1.5
   TA_MAX_RISK_PCT_PER_TRADE=1.0   # logged on TA-SIM open when enhancements on (full-balance PnL model unchanged)
   TA_MTF_CONFLUENCE=1             # 0 = plain mean TF score in digest; 1 = weighted MTF confluence (top-down alignment)
+  TA_MTF_V2=0                     # 1 = OBV-tilt per TF + tighter 1h/1d conflict; no alignment ×1.25 boost (needs TA_MTF_CONFLUENCE=1)
+  TA_PRECISION_SIGNAL_V2=0        # 1 = regime layer matrix, logistic confidence, core TA omitted from precision blend
   TA_STRUCTURAL_TP_SL=1           # 1 = TA-SIM: prefer swing-based TP/SL when R:R ≥ 1.5 (not Gemini/precision TP/SL)
+  TA_STRUCTURAL_TP_SL_V2=0        # 1 = 15-bar pivots, min R:R 1.8, ATR-bounded SL, stale-pivot filter (with TA_STRUCTURAL_TP_SL=1)
+  TA_TF_LABEL_ADAPTIVE=0          # 1 = 5m digest label uses rolling z-score vs persisted 5m scores (precision_score_history.json)
+  TA_ENTRY_MOMENTUM_QUALITY=0     # 1 = extra entry filter: block hidden price/RSI divergence on the signal bar
+  TA_SCORE_HISTORY_MAX=200        # max points in precision score history file (for adaptive labels + precision v2)
   TA_SIM_PRECISION_CONF_GATE=0    # 1 = TA-SIM: require precision LONG/SHORT to match side + min confidence
   TA_SIM_PRECISION_CONF_MIN=       # optional override for gate; else uses TA_PRECISION_CONF_MIN
   TA_POST_SL_DIRECTION_GUARD=1    # After N SLs same way, tighten repeat entries; validate flips vs 5m/precision
@@ -142,6 +148,7 @@ Env (TA trade sim — set TA_TRADE_SIM=1 or no TA-SIM opens/closes are sent):
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -449,6 +456,31 @@ def _strategy_enhancements_enabled() -> bool:
     return os.environ.get("TA_STRATEGY_ENHANCEMENTS", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _precision_signal_v2_enabled() -> bool:
+    """Precision stack v2: regime layer weights, no core-TA double count, logistic confidence, momentum quality."""
+    return os.environ.get("TA_PRECISION_SIGNAL_V2", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _mtf_confluence_v2_enabled() -> bool:
+    """MTF mean uses OBV tilt per TF and revised conflict penalties (no ×1.25 alignment boost)."""
+    return os.environ.get("TA_MTF_V2", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _structural_tp_sl_v2_enabled() -> bool:
+    """Wider pivot lookback, min R:R 1.8, ATR-bounded SL, pivot staleness filter."""
+    return os.environ.get("TA_STRUCTURAL_TP_SL_V2", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _tf_label_adaptive_enabled() -> bool:
+    """5m digest label uses rolling z-score vs persisted 5m score history (see precision_score_history.json)."""
+    return os.environ.get("TA_TF_LABEL_ADAPTIVE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _entry_momentum_quality_enabled() -> bool:
+    """Reject entries when price vs RSI momentum disagree on the entry bar (hidden divergence)."""
+    return os.environ.get("TA_ENTRY_MOMENTUM_QUALITY", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _gemini_entries_env_enabled() -> bool:
     """
     Whether Gemini is enabled for paper-trade entries (before TA_OPEN_EVERY_DIGEST turns it off).
@@ -668,6 +700,37 @@ def _tf_label(score: float) -> str:
     if score <= -2.5:
         return "Strong Sell"
     if score <= -0.8:
+        return "Sell"
+    return "Neutral"
+
+
+def tf_label_adaptive(score: float, score_history: list[float] | None = None) -> str:
+    """
+    Like _tf_label() but thresholds follow the rolling distribution of scores (e.g. past 5m digests).
+    Without enough history, uses fixed ±0.7 / ±2.0 bands (slightly tighter than legacy ±0.8 / ±2.5).
+    """
+    if score_history and len(score_history) >= 20:
+        arr = np.array(score_history, dtype=float)
+        mu, sigma = float(np.mean(arr)), float(np.std(arr))
+        if sigma < 1e-9:
+            sigma = 1.0
+        z = (score - mu) / sigma
+        if z >= 1.5:
+            return "Strong Buy"
+        if z >= 0.5:
+            return "Buy"
+        if z <= -1.5:
+            return "Strong Sell"
+        if z <= -0.5:
+            return "Sell"
+        return "Neutral"
+    if score >= 2.0:
+        return "Strong Buy"
+    if score >= 0.7:
+        return "Buy"
+    if score <= -2.0:
+        return "Strong Sell"
+    if score <= -0.7:
         return "Sell"
     return "Neutral"
 
@@ -1410,6 +1473,105 @@ def _mtf_confluence_score(scores: dict[str, float]) -> tuple[float, str]:
     return float(np.clip(base, -5.0, 5.0)), note
 
 
+def _obv_momentum_tilt(df: pd.DataFrame, period: int = 14) -> float:
+    """+1 / -1 / 0 from short-horizon EMA(OBV) slope vs recent noise."""
+    close = df["close"].values.astype(float)
+    vol = df["volume"].values.astype(float) if "volume" in df.columns else None
+    if vol is None or len(close) < period + 5:
+        return 0.0
+    obv = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if close[i] > close[i - 1]:
+            obv[i] = obv[i - 1] + vol[i]
+        elif close[i] < close[i - 1]:
+            obv[i] = obv[i - 1] - vol[i]
+        else:
+            obv[i] = obv[i - 1]
+    obv_ema = talib.EMA(obv, timeperiod=period)
+    if len(obv_ema) < 3:
+        return 0.0
+    prev = obv_ema[-3] if not np.isnan(obv_ema[-3]) else None
+    cur = obv_ema[-1] if not np.isnan(obv_ema[-1]) else None
+    if prev is None or cur is None:
+        return 0.0
+    delta = cur - prev
+    std = float(np.nanstd(obv_ema[-20:])) if len(obv_ema) >= 20 else 1.0
+    if std < 1e-9:
+        return 0.0
+    z = delta / std
+    if z > 0.3:
+        return 1.0
+    if z < -0.3:
+        return -1.0
+    return 0.0
+
+
+def _mtf_confluence_score_v2(
+    scores: dict[str, float],
+    df_map: dict[str, pd.DataFrame] | None = None,
+) -> tuple[float, str]:
+    weights = {
+        "5m": 0.10,
+        "15m": 0.15,
+        "30m": 0.15,
+        "1h": 0.25,
+        "4h": 0.15,
+        "1d": 0.20,
+        "1w": 0.03,
+        "1M": 0.02,
+    }
+    if not scores:
+        return 0.0, "MTF v2: no data"
+    if len(scores) == 1:
+        k, v = next(iter(scores.items()))
+        return float(v), f"MTF v2: single TF ({k})"
+
+    weighted_sum = 0.0
+    total_w = 0.0
+    for tf, sc in scores.items():
+        w = float(weights.get(tf, 0.05))
+        adj_sc = float(sc)
+        if df_map and tf in df_map:
+            tilt = _obv_momentum_tilt(df_map[tf])
+            if tilt != 0.0:
+                adj_sc = adj_sc * (1.0 + tilt * 0.15)
+        weighted_sum += adj_sc * w
+        total_w += w
+
+    if total_w < 1e-9:
+        return 0.0, "MTF v2: zero weight"
+
+    base = weighted_sum / total_w
+    active = [float(sc) for sc in scores.values()]
+    bull = sum(1 for s in active if s > 0.5)
+    bear = sum(1 for s in active if s < -0.5)
+    n_act = len(active)
+
+    if bull >= int(n_act * 0.75) and n_act >= 3:
+        note = f"MTF v2: {bull}/{n_act} bullish (aligned)"
+    elif bear >= int(n_act * 0.75) and n_act >= 3:
+        note = f"MTF v2: {bear}/{n_act} bearish (aligned)"
+    elif bull > 0 and bear > 0:
+        s1h = scores.get("1h")
+        s1d = scores.get("1d")
+        if (
+            s1h is not None
+            and s1d is not None
+            and ((s1h > 0.3 and s1d < -0.3) or (s1h < -0.3 and s1d > 0.3))
+        ):
+            base *= 0.20
+            note = "MTF v2: 1h vs 1d conflict → no-trade zone (×0.20)"
+        else:
+            conflict_ratio = min(bull, bear) / max(bull, bear, 1)
+            penalty = 0.65 - conflict_ratio * 0.10
+            base *= penalty
+            note = f"MTF v2: mixed {bull}↑/{bear}↓ (×{penalty:.2f})"
+    else:
+        note = f"MTF v2: neutral {bull}↑/{bear}↓"
+
+    return float(np.clip(base, -5.0, 5.0)), note
+
+
 @dataclass
 class PrecisionSignal:
     action: str          # "LONG", "SHORT", "HOLD"
@@ -1675,6 +1837,291 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
         0,
         f"TA score {ta_score:+.2f} → {_tf_label(ta_score)} "
         f"[{bull_count}↑/{bear_count}↓ of {len(layer_votes)} layers]",
+    )
+
+    if action == "HOLD":
+        confidence = max(0, min(confidence, 50))
+
+    return PrecisionSignal(
+        action=action,
+        confidence=confidence,
+        score=final,
+        reasons=reasons,
+        divergence_note=div_note,
+        patterns=patterns,
+        supertrend=st_dir,
+    )
+
+
+def _regime_layer_weights(regime: str) -> dict[str, float]:
+    if regime == "trending":
+        return {
+            "ema_ribbon": 0.18,
+            "supertrend": 0.16,
+            "macd_mom": 0.14,
+            "ms_bos": 0.14,
+            "vol_delta": 0.10,
+            "rsi_smooth": 0.06,
+            "divergence": 0.06,
+            "vol_quality": 0.06,
+            "candlestick": 0.05,
+            "liquidity": 0.05,
+        }
+    if regime == "ranging":
+        return {
+            "ema_ribbon": 0.06,
+            "supertrend": 0.07,
+            "macd_mom": 0.07,
+            "ms_bos": 0.08,
+            "vol_delta": 0.10,
+            "rsi_smooth": 0.18,
+            "divergence": 0.18,
+            "vol_quality": 0.08,
+            "candlestick": 0.08,
+            "liquidity": 0.10,
+        }
+    return {
+        "ema_ribbon": 0.12,
+        "supertrend": 0.10,
+        "macd_mom": 0.10,
+        "ms_bos": 0.10,
+        "vol_delta": 0.09,
+        "rsi_smooth": 0.10,
+        "divergence": 0.12,
+        "vol_quality": 0.07,
+        "candlestick": 0.08,
+        "liquidity": 0.07,
+        "core_ta": 0.05,
+    }
+
+
+def _logistic_confidence(weighted_score: float, k: float = 8.0) -> int:
+    s = float(np.clip(weighted_score, -1.0, 1.0))
+    prob = 1.0 / (1.0 + math.exp(-k * s))
+    conf = int(abs(prob - 0.5) * 200)
+    return max(0, min(100, conf))
+
+
+def _momentum_quality_ok(df: pd.DataFrame, side: str, lookback: int = 3) -> tuple[bool, str]:
+    close = df["close"].values.astype(float)
+    n = len(close)
+    if n < 30:
+        return True, ""
+    rsi_arr = talib.RSI(close, timeperiod=14)
+    i_now = n - 1
+    i_old = n - lookback - 1
+    if i_old < 0 or np.isnan(rsi_arr[i_now]) or np.isnan(rsi_arr[i_old]):
+        return True, ""
+    price_delta = float(close[i_now]) - float(close[i_old])
+    rsi_delta = float(rsi_arr[i_now]) - float(rsi_arr[i_old])
+    s = (side or "").strip().upper()
+    if s == "LONG":
+        if price_delta > 0 and rsi_delta < -1.0:
+            return False, f"momentum quality: price ↑ but RSI ↓{rsi_delta:.1f} (hidden bearish div)"
+        if price_delta < 0 and rsi_delta < -2.0:
+            return False, f"momentum quality: price ↓ and RSI ↓{rsi_delta:.1f} — no long momentum"
+    elif s == "SHORT":
+        if price_delta < 0 and rsi_delta > 1.0:
+            return False, f"momentum quality: price ↓ but RSI ↑{rsi_delta:.1f} (hidden bullish div)"
+        if price_delta > 0 and rsi_delta > 2.0:
+            return False, f"momentum quality: price ↑ and RSI ↑{rsi_delta:.1f} — no short momentum"
+    return True, ""
+
+
+def _compute_precision_signal_v2(
+    df_5m: pd.DataFrame,
+    regime: str = "unknown",
+    score_history: list[float] | None = None,
+) -> PrecisionSignal:
+    empty = PrecisionSignal("HOLD", 0, 0.0, ["Insufficient data"], "", [], 0)
+    if df_5m is None or len(df_5m) < 60:
+        return empty
+
+    ta_score, _ = _analyze_ohlcv(df_5m)
+    close = df_5m["close"].values.astype(float)
+    high = df_5m["high"].values.astype(float)
+    low = df_5m["low"].values.astype(float)
+    reasons: list[str] = []
+    layer_scores: dict[str, float] = {}
+    layer_votes: dict[str, int] = {}
+    patterns: list[str] = []
+
+    rv, rn = _ema_ribbon_vote(close)
+    layer_scores["ema_ribbon"] = float(rv)
+    layer_votes["ema_ribbon"] = rv
+    if rv != 0:
+        reasons.append(rn)
+
+    rsi_div, macd_div, div_note = _detect_divergence(df_5m)
+    div_raw = float(np.clip((rsi_div + macd_div) / 2.0, -1.0, 1.0))
+    layer_scores["divergence"] = div_raw
+    layer_votes["divergence"] = 1 if div_raw > 0 else (-1 if div_raw < 0 else 0)
+    if rsi_div != 0 or macd_div != 0:
+        reasons.append(div_note)
+
+    st_dir = _supertrend_signal(df_5m)
+    layer_scores["supertrend"] = float(st_dir)
+    layer_votes["supertrend"] = st_dir
+    if st_dir == 1:
+        reasons.append("Supertrend: bullish")
+    elif st_dir == -1:
+        reasons.append("Supertrend: bearish")
+
+    mv, mn = _macd_momentum_vote(close)
+    layer_scores["macd_mom"] = float(mv)
+    layer_votes["macd_mom"] = mv
+    if mv != 0:
+        reasons.append(mn)
+
+    rsv, rsn = _smoothed_rsi_vote(close)
+    layer_scores["rsi_smooth"] = float(rsv)
+    layer_votes["rsi_smooth"] = rsv
+    if rsv != 0:
+        reasons.append(rsn)
+
+    vol_sc = 0.0
+    vol_vote = 0
+    if "volume" in df_5m.columns and "open" in df_5m.columns and len(df_5m) >= 20:
+        vol = df_5m["volume"].values.astype(float)
+        avg_vol = float(np.mean(vol[-20:]))
+        if avg_vol > 0:
+            ratio = float(vol[-1]) / avg_vol
+            if ratio > 1.5 and len(close) >= 2:
+                body = abs(float(close[-1]) - float(df_5m["open"].values[-1]))
+                rng = float(high[-1]) - float(low[-1])
+                body_r = body / rng if rng > 0 else 0.0
+                if body_r >= 0.25:
+                    direction = 1.0 if close[-1] > close[-2] else -1.0
+                    vol_sc = direction * min(ratio / 3.0, 0.8)
+                    vol_vote = 1 if direction > 0 else -1
+                    reasons.append(
+                        f"Vol surge ×{ratio:.1f} body={body_r:.0%} {'↑' if direction > 0 else '↓'}"
+                    )
+                else:
+                    reasons.append(f"Vol surge ×{ratio:.1f} small body — filtered")
+    layer_scores["vol_quality"] = vol_sc
+    layer_votes["vol_quality"] = vol_vote
+
+    msv, msn = _market_structure_signal(df_5m)
+    layer_scores["ms_bos"] = float(msv)
+    layer_votes["ms_bos"] = msv
+    if msv != 0:
+        reasons.append(msn)
+
+    dv, dn = _volume_delta_signal(df_5m)
+    layer_scores["vol_delta"] = float(dv)
+    layer_votes["vol_delta"] = dv
+    if dv != 0:
+        reasons.append(dn)
+
+    lv, ln = _liquidity_levels(df_5m)
+    layer_scores["liquidity"] = float(lv)
+    layer_votes["liquidity"] = lv
+    if ln and "no significant" not in ln:
+        reasons.append(ln)
+
+    candle_sc, patterns = _candlestick_signal(df_5m)
+    candle_norm = float(np.clip(candle_sc / 1.5, -1.0, 1.0))
+    layer_scores["candlestick"] = candle_norm
+    layer_votes["candlestick"] = 1 if candle_norm > 0.1 else (-1 if candle_norm < -0.1 else 0)
+    if patterns:
+        reasons.append(f"Patterns: {', '.join(patterns)}")
+
+    weights = _regime_layer_weights(regime)
+    total_w = sum(weights.get(k, 0.05) for k in layer_scores)
+    if total_w < 1e-9:
+        total_w = 1.0
+    weighted_score = sum(
+        layer_scores[k] * weights.get(k, 0.05) / total_w for k in layer_scores
+    )
+
+    noise_mult = 1.0
+    noise_notes: list[str] = []
+
+    adx_val = _last(talib.ADX(high, low, close, timeperiod=14))
+    if adx_val is not None:
+        if adx_val < 18:
+            noise_mult *= 0.70
+            noise_notes.append(f"ADX={adx_val:.1f} ranging ×0.70")
+        elif adx_val < 22:
+            noise_mult *= 0.85
+            noise_notes.append(f"ADX={adx_val:.1f} weak ×0.85")
+        else:
+            noise_notes.append(f"ADX={adx_val:.1f} trending ✓")
+
+    ci = _choppiness_index(df_5m)
+    if ci is not None:
+        if ci > 65:
+            noise_mult *= 0.70
+            noise_notes.append(f"CI={ci:.1f} choppy ×0.70")
+        elif ci < 35:
+            noise_notes.append(f"CI={ci:.1f} trending ✓")
+
+    atr_arr = talib.ATR(high, low, close, timeperiod=14)
+    cur_atr = _last(atr_arr)
+    if cur_atr is not None and len(atr_arr) >= 20:
+        avg_atr = float(np.nanmean(atr_arr[-20:]))
+        if avg_atr > 0 and cur_atr > 3.0 * avg_atr:
+            noise_mult *= 0.85
+            noise_notes.append(f"ATR spike ×{cur_atr/avg_atr:.1f} ×0.85")
+
+    as_of = None
+    if "timestamp" in df_5m.columns and len(df_5m) > 0:
+        as_of = df_5m["timestamp"].iloc[-1]
+    sess_mult, sess_note = _session_quality_multiplier(as_of)
+    noise_mult *= sess_mult
+    noise_notes.append(sess_note)
+
+    all_votes = list(layer_votes.values())
+    bull_count = sum(1 for v in all_votes if v > 0)
+    bear_count = sum(1 for v in all_votes if v < 0)
+    if bull_count >= 2 and bear_count >= 2:
+        mx = max(bull_count, bear_count)
+        mn_v = min(bull_count, bear_count)
+        ratio = float(mn_v) / float(mx) if mx else 0.0
+        penalty = 0.70 + ratio * 0.20
+        noise_mult *= penalty
+        noise_notes.append(f"Conflict {bull_count}↑/{bear_count}↓ ×{penalty:.2f}")
+
+    if noise_notes:
+        reasons.append("Noise filters: " + " | ".join(noise_notes))
+
+    weighted_score *= noise_mult
+    final = float(np.clip(weighted_score, -1.0, 1.0))
+    confidence = _logistic_confidence(final)
+
+    if adx_val is not None and adx_val >= 22:
+        confidence = min(100, int(confidence * 1.10))
+
+    min_votes = int(os.environ.get("TA_PRECISION_MIN_VOTES", "2"))
+    if final >= 0.12:
+        action = "LONG"
+        agreeing = bull_count
+    elif final <= -0.12:
+        action = "SHORT"
+        agreeing = bear_count
+    else:
+        action = "HOLD"
+        agreeing = 0
+
+    if action in ("LONG", "SHORT") and agreeing < min_votes:
+        reasons.append(f"Vote gate: {agreeing} < {min_votes} required → HOLD")
+        action = "HOLD"
+        confidence = max(0, confidence - 15)
+
+    if action in ("LONG", "SHORT"):
+        total_active = max(bull_count + bear_count, 1)
+        consensus_ratio = agreeing / total_active
+        if consensus_ratio >= 0.70:
+            confidence = min(95, int(confidence * 1.10))
+            reasons.append(f"Consensus {consensus_ratio:.0%} ✓")
+
+    lab = tf_label_adaptive(ta_score, score_history)
+    n_layers = len(layer_votes)
+    reasons.insert(
+        0,
+        f"Precision v2 | TA score {ta_score:+.2f} → {lab} "
+        f"[{bull_count}↑/{bear_count}↓ of {n_layers} layers | regime={regime}]",
     )
 
     if action == "HOLD":
@@ -2037,6 +2484,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     label_map: dict[str, str] = {}
     df_5m: pd.DataFrame | None = None
     df_1h: pd.DataFrame | None = None
+    dfs_map: dict[str, pd.DataFrame] = {}
 
     for interval, label in frames:
         try:
@@ -2048,6 +2496,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             lines.append(f"{label}: no data")
             continue
         df = _klines_to_df(kl)
+        dfs_map[interval] = df
         if interval == "5m":
             df_5m = df
         if interval == "1h":
@@ -2055,10 +2504,13 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         sc, det = _analyze_ohlcv(df)
         tf_scores.append(sc)
         score_map[interval] = float(sc)
-        lab = _tf_label(sc)
+        if _tf_label_adaptive_enabled() and interval == "5m":
+            lab = tf_label_adaptive(float(sc), _load_score_history(symbol))
+        else:
+            lab = _tf_label(sc)
         tf_labels.append(lab)
         label_map[interval] = lab
-        lines.append(f"── {label} ──  {_tf_label(sc)}")
+        lines.append(f"── {label} ──  {lab}")
         price = float(df["close"].iloc[-1])
         lines.append(f"  Close: {price:,.2f}")
         for k in sorted(det.keys()):
@@ -2104,7 +2556,11 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         "on",
     )
     if use_mtf_conf and score_map:
-        mean_score, mtf_digest_note = _mtf_confluence_score(score_map)
+        if _mtf_confluence_v2_enabled():
+            dm = {k: v for k, v in dfs_map.items() if k in score_map}
+            mean_score, mtf_digest_note = _mtf_confluence_score_v2(score_map, dm)
+        else:
+            mean_score, mtf_digest_note = _mtf_confluence_score(score_map)
     else:
         mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
         mtf_digest_note = ""
@@ -2200,7 +2656,11 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     precision: PrecisionSignal | None = None
     precision_header_lines: list[str] = []
     try:
-        if _strategy_enhancements_enabled():
+        if _precision_signal_v2_enabled():
+            precision = _compute_precision_signal_v2(
+                df_5m, regime, _load_score_history(symbol)
+            )
+        elif _strategy_enhancements_enabled():
             precision = _compute_precision_signal_enhanced(df_5m, regime)
         else:
             precision = _compute_precision_signal(df_5m)
@@ -2231,6 +2691,12 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         precision_header_lines.append(f"⚡ Precision signal: (error: {e})")
 
     final_lines = precision_header_lines + [""] + lines
+
+    if _tf_label_adaptive_enabled() or _precision_signal_v2_enabled():
+        try:
+            _append_score_history(symbol, score_5m)
+        except Exception:
+            pass
 
     return TASnapshot(
         text="\n".join(final_lines),
@@ -2284,6 +2750,53 @@ def _ta_sim_precision_gate_ok(snap: TASnapshot, side: str) -> tuple[bool, str]:
 def _ta_dir(symbol: str) -> Path:
     base = os.environ.get("TA_STATE_DIR", "data/ta_sim").strip()
     return _ROOT / base / symbol
+
+
+def _score_history_path(symbol: str) -> Path:
+    return _ta_dir(symbol) / "precision_score_history.json"
+
+
+def _load_score_history(symbol: str) -> list[float]:
+    p = _score_history_path(symbol)
+    if not p.is_file():
+        return []
+    try:
+        with open(p, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[float] = []
+    for x in raw:
+        try:
+            out.append(float(x))
+        except (TypeError, ValueError):
+            continue
+    try:
+        cap = int(os.environ.get("TA_SCORE_HISTORY_MAX", "200"))
+    except ValueError:
+        cap = 200
+    cap = max(20, min(cap, 500))
+    return out[-cap:]
+
+
+def _append_score_history(symbol: str, score_5m: float) -> None:
+    p = _score_history_path(symbol)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    hist = _load_score_history(symbol)
+    hist.append(float(score_5m))
+    try:
+        cap = int(os.environ.get("TA_SCORE_HISTORY_MAX", "200"))
+    except ValueError:
+        cap = 200
+    cap = max(20, min(cap, 500))
+    hist = hist[-cap:]
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(hist, f, indent=2)
+    except Exception:
+        pass
 
 
 def _pos_path(symbol: str) -> Path:
@@ -2798,6 +3311,101 @@ def _structural_tp_sl(df: pd.DataFrame, side: str, close: float) -> tuple[float 
     return tp, sl_level, f"structural TP {tp:.2f} / SL {sl_level:.2f} | R:R {rr:.2f}:1"
 
 
+def _structural_tp_sl_v2(
+    df: pd.DataFrame,
+    side: str,
+    close: float,
+    min_rr: float = 1.8,
+    pivot_bars: int = 15,
+    min_pivot_age_bars: int = 5,
+) -> tuple[float | None, float | None, str]:
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
+    atr_val = _atr_from_df(df)
+    n = len(highs)
+    if atr_val is None or atr_val <= 0:
+        return None, None, "structural_v2: ATR unavailable"
+    if n < pivot_bars * 2 + 5:
+        return None, None, "structural_v2: insufficient bars"
+
+    def _find_pivots(
+        arr: np.ndarray, direction: str, bars: int, min_age: int
+    ) -> list[tuple[int, float]]:
+        result: list[tuple[int, float]] = []
+        for i in range(bars, n - bars):
+            if n - 1 - i < min_age:
+                continue
+            if direction == "high":
+                if all(arr[i] >= arr[i - j] for j in range(1, bars + 1)) and all(
+                    arr[i] >= arr[i + j] for j in range(1, bars + 1)
+                ):
+                    result.append((i, float(arr[i])))
+            else:
+                if all(arr[i] <= arr[i - j] for j in range(1, bars + 1)) and all(
+                    arr[i] <= arr[i + j] for j in range(1, bars + 1)
+                ):
+                    result.append((i, float(arr[i])))
+        return result
+
+    sh = _find_pivots(highs, "high", pivot_bars, min_pivot_age_bars)
+    sl_pts = _find_pivots(lows, "low", pivot_bars, min_pivot_age_bars)
+
+    s = (side or "").upper()
+    if s == "LONG":
+        tp_candidates = sorted(
+            [(i, v) for i, v in sh if v > close * 1.001], key=lambda x: x[1]
+        )
+        sl_candidates = sorted(
+            [(i, v) for i, v in sl_pts if v < close * 0.999], key=lambda x: x[0], reverse=True
+        )
+        if not tp_candidates or not sl_candidates:
+            return None, None, "structural_v2: insufficient pivot candidates for LONG"
+        tp_raw = tp_candidates[0][1]
+        sl_raw = sl_candidates[0][1] - atr_val * 0.25
+    elif s == "SHORT":
+        tp_candidates = sorted(
+            [(i, v) for i, v in sl_pts if v < close * 0.999], key=lambda x: x[1], reverse=True
+        )
+        sl_candidates = sorted(
+            [(i, v) for i, v in sh if v > close * 1.001], key=lambda x: x[0], reverse=True
+        )
+        if not tp_candidates or not sl_candidates:
+            return None, None, "structural_v2: insufficient pivot candidates for SHORT"
+        tp_raw = tp_candidates[0][1]
+        sl_raw = sl_candidates[0][1] + atr_val * 0.25
+    else:
+        return None, None, f"structural_v2: unknown side {side}"
+
+    tp_dist = abs(tp_raw - close)
+    sl_dist = abs(sl_raw - close)
+
+    sl_min_dist = atr_val * 0.5
+    sl_max_dist = atr_val * 2.5
+    if sl_dist < sl_min_dist:
+        sl_dist = sl_min_dist
+        sl_raw = close - sl_dist if s == "LONG" else close + sl_dist
+    if sl_dist > sl_max_dist:
+        sl_dist = sl_max_dist
+        sl_raw = close - sl_dist if s == "LONG" else close + sl_dist
+
+    if sl_dist < 1e-9:
+        return None, None, "structural_v2: SL distance zero"
+
+    rr = tp_dist / sl_dist
+    if rr < min_rr:
+        return (
+            None,
+            None,
+            f"structural_v2: R:R {rr:.2f} < min {min_rr} (tp_dist={tp_dist:.4f} sl_dist={sl_dist:.4f})",
+        )
+
+    return (
+        tp_raw,
+        sl_raw,
+        f"structural_v2 | TP {tp_raw:.4f} / SL {sl_raw:.4f} | R:R {rr:.2f}:1 | ATR={atr_val:.4f}",
+    )
+
+
 def _bar_close_time_5m(df: pd.DataFrame):
     ts = df["timestamp"].iloc[-1]
     return pd.Timestamp(ts) + pd.Timedelta(minutes=5)
@@ -2929,6 +3537,11 @@ def _entry_filters_pass(snap: TASnapshot, side: str, df: pd.DataFrame) -> tuple[
                 False,
                 f"HTF bullish vs SHORT: 15m={s15:+.2f} 1h={s1h:+.2f} (≥ {bullish_min})",
             )
+
+    if _entry_momentum_quality_enabled():
+        mq_ok, mq_reason = _momentum_quality_ok(df, side)
+        if not mq_ok:
+            return False, mq_reason
 
     return True, ""
 
@@ -4307,7 +4920,10 @@ def process_ta_trade_sim(
         and not levels_from_gemini
         and not precision_tp_sl_used
     ):
-        struct_tp, struct_sl, struct_desc = _structural_tp_sl(df, side, close_price)
+        if _structural_tp_sl_v2_enabled():
+            struct_tp, struct_sl, struct_desc = _structural_tp_sl_v2(df, side, close_price)
+        else:
+            struct_tp, struct_sl, struct_desc = _structural_tp_sl(df, side, close_price)
         if struct_tp is not None and struct_sl is not None:
             tp_price, sl_price = struct_tp, struct_sl
             open_extra = f"{open_extra} | {struct_desc}" if open_extra else struct_desc
