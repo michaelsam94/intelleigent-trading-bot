@@ -1320,9 +1320,16 @@ def _liquidity_levels(df: pd.DataFrame, tolerance_pct: float = 0.15) -> tuple[in
     return 0, f"Liq: above {na} ({da:.1f}%), below {nb} ({db:.1f}%)"
 
 
-def _session_quality_multiplier() -> tuple[float, str]:
-    """Reduce confidence during low-liquidity periods (UTC)."""
-    now = datetime.now(timezone.utc)
+def _session_quality_multiplier(as_of: datetime | pd.Timestamp | None = None) -> tuple[float, str]:
+    """Reduce confidence during low-liquidity periods (UTC) using the analyzed candle time when available."""
+    if as_of is None:
+        now = datetime.now(timezone.utc)
+    else:
+        now = as_of.to_pydatetime() if isinstance(as_of, pd.Timestamp) else as_of
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
     hour = now.hour
     weekday = now.weekday()
 
@@ -1604,8 +1611,11 @@ def _compute_precision_signal(df_5m: pd.DataFrame) -> PrecisionSignal:
             noise_mult *= 0.85
             noise_notes.append(f"ATR spike ×{cur_atr/avg_atr:.1f} ×0.85")
 
-    # Filter 4: Session quality (UTC)
-    sess_mult, sess_note = _session_quality_multiplier()
+    # Filter 4: Session quality (UTC), anchored to the analyzed candle rather than wall-clock time.
+    as_of = None
+    if "timestamp" in df_5m.columns and len(df_5m) > 0:
+        as_of = df_5m["timestamp"].iloc[-1]
+    sess_mult, sess_note = _session_quality_multiplier(as_of)
     noise_mult *= sess_mult
     noise_notes.append(sess_note)
 
@@ -1980,11 +1990,13 @@ class TASnapshot:
     tf_scores: list[float]
     tf_labels: list[str]
     mean_score: float
-    score_5m: float  # first TF in list (5m) — used for direction when TA_OPEN_EVERY_DIGEST=1
+    score_5m: float  # 5m TF score only; never inferred from list position
     score_for_entry: float  # 5m or mean per TA_SIGNAL_ON_5M — thresholds TA_LONG_ENTRY_SCORE / TA_SHORT_ENTRY_SCORE
     entry_score_kind: str  # "5m" or "mean"
     label_5m: str  # _tf_label(score_5m) string e.g. Buy, Neutral
     df_5m: pd.DataFrame | None
+    score_map: dict[str, float] = field(default_factory=dict)
+    label_map: dict[str, str] = field(default_factory=dict)
     htf_scores: dict[str, float] = field(default_factory=dict)  # 15m / 1h TF scores for entry filters
     mtf_30mar: dict[str, float] = field(default_factory=dict)
     mar_rsi: dict[str, float | None] = field(default_factory=dict)
@@ -2022,6 +2034,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
     tf_scores: list[float] = []
     tf_labels: list[str] = []
     score_map: dict[str, float] = {}
+    label_map: dict[str, str] = {}
     df_5m: pd.DataFrame | None = None
     df_1h: pd.DataFrame | None = None
 
@@ -2044,6 +2057,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         score_map[interval] = float(sc)
         lab = _tf_label(sc)
         tf_labels.append(lab)
+        label_map[interval] = lab
         lines.append(f"── {label} ──  {_tf_label(sc)}")
         price = float(df["close"].iloc[-1])
         lines.append(f"  Close: {price:,.2f}")
@@ -2067,9 +2081,11 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             lines.append("")
 
     htf_scores: dict[str, float] = {}
-    if not digest_5m_only and len(tf_scores) >= 4:
-        htf_scores["15m"] = float(tf_scores[1])
-        htf_scores["1h"] = float(tf_scores[3])
+    if not digest_5m_only:
+        if "15m" in score_map:
+            htf_scores["15m"] = float(score_map["15m"])
+        if "1h" in score_map:
+            htf_scores["1h"] = float(score_map["1h"])
     elif digest_5m_only and _signal_filters_enabled():
         for interval, key in (("15m", "15m"), ("1h", "1h")):
             try:
@@ -2093,8 +2109,8 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         mean_score = float(np.mean(tf_scores)) if tf_scores else 0.0
         mtf_digest_note = ""
 
-    score_5m = float(tf_scores[0]) if tf_scores else 0.0
-    label_5m = tf_labels[0] if tf_labels else "N/A"
+    score_5m = float(score_map.get("5m", 0.0))
+    label_5m = label_map.get("5m", "N/A")
     use_5m_signal = _signal_on_5m()
     score_for_entry = score_5m if use_5m_signal else mean_score
     entry_score_kind = "5m" if use_5m_signal else "mean"
@@ -2109,8 +2125,10 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         if use_mtf_conf and mtf_digest_note and len(score_map) > 1:
             lines.append(f"MTF: {mtf_digest_note}")
         lines.append(f"5m score: {score_5m:+.4f} | TF labels: {', '.join(tf_labels)}")
-        if use_5m_signal:
+        if use_5m_signal and "5m" in score_map:
             lines.append(f"Entry signal (5m TF): {label_5m} (score {score_5m:+.4f})")
+        elif use_5m_signal:
+            lines.append("Entry signal (5m TF): unavailable")
         if _signal_filters_enabled():
             lines.append(
                 "TA_SIGNAL_FILTERS: ON — paper-trade entries require score band, ADX+MACD, 15m/1h trend (see docs)"
@@ -2138,11 +2156,10 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
 
     signal_banner: str | None = None
     if os.environ.get("TA_SIGNAL_ALERTS", "1").strip().lower() in ("1", "true", "yes", "on"):
-        if use_5m_signal and tf_labels:
-            lab5 = tf_labels[0]
-            if lab5 in ("Strong Buy", "Buy"):
+        if use_5m_signal and "5m" in label_map:
+            if label_5m in ("Strong Buy", "Buy"):
                 signal_banner = "📌 TA SIGNAL: BULLISH (5m TF)"
-            elif lab5 in ("Strong Sell", "Sell"):
+            elif label_5m in ("Strong Sell", "Sell"):
                 signal_banner = "📌 TA SIGNAL: BEARISH (5m TF)"
         elif not digest_5m_only:
             strong_buy = sum(1 for x in tf_labels if x == "Strong Buy")
@@ -2194,7 +2211,7 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
             seg = 1
         bar = "█" * seg + "░" * (10 - seg)
         precision_header_lines.append(
-            f"⚡ PRECISION SIGNAL: {action_emoji} {precision.action}  |  Confidence: {pc}%  [{bar}]"
+            f"⚡ PRECISION SIGNAL: {action_emoji} {precision.action}  |  Strength: {pc}%  [{bar}]"
         )
         vote_txt = f"Score: {precision.score:+.3f}"
         if precision.reasons:
@@ -2226,6 +2243,8 @@ def build_snapshot(symbol: str, limit: int) -> TASnapshot:
         entry_score_kind=entry_score_kind,
         label_5m=label_5m,
         df_5m=df_5m,
+        score_map=score_map,
+        label_map=label_map,
         htf_scores=htf_scores,
         mtf_30mar=mtf_30mar,
         mar_rsi=mar_rsi,
