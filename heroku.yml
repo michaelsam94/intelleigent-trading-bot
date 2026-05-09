@@ -1,0 +1,5 @@
+build:
+  docker:
+    worker: Dockerfile
+run:
+  worker: sh -c "${START_CMD:-python -u scripts/eth_ta_telegram.py}"

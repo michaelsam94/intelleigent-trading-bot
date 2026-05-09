@@ -1,12 +1,13 @@
-# Container image for scripts/eth_ta_telegram.py only (Railway, Fly.io, etc.; no full ML stack).
-# Repo root `Dockerfile` is a symlink to this file so Fly.io uses docker build (not Paketo).
+# Container image for scripts/eth_ta_telegram.py only (Railway, Fly.io, Heroku worker, etc.; no full ML stack).
+# Repo root `Dockerfile` is a symlink to this file so platforms use Docker build (not buildpacks).
 # Build: docker build -t eth-ta-telegram .   OR   docker build -f Dockerfile.railway-eth-ta -t eth-ta-telegram .
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_ROOT_USER_ACTION=ignore
+    PIP_ROOT_USER_ACTION=ignore \
+    START_CMD="python -u scripts/eth_ta_telegram.py"
 
 WORKDIR /app
 
@@ -36,4 +37,6 @@ COPY common/ ./common/
 
 RUN mkdir -p data/ta_sim
 
-CMD ["python", "-u", "scripts/eth_ta_telegram.py"]
+# Heroku-friendly: allows overriding process command via config var:
+# heroku config:set START_CMD="python -m service.server -c /app/config.json"
+CMD ["sh", "-c", "$START_CMD"]
